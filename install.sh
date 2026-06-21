@@ -125,8 +125,10 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-# Get server IP
-SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+# Get server IPv4 address (force -4 to avoid IPv6)
+SERVER_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || \
+            curl -4 -s --max-time 5 icanhazip.com 2>/dev/null || \
+            hostname -I | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -1)
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"

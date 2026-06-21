@@ -80,13 +80,15 @@
     </div>
   </div>
 
-  {% if proto.get('installed') %}
+  {% if proto.get('installed') or clients %}
   <!-- Clients Section -->
   <div class="clients-section">
     <div class="clients-header">
       <h3>Users ({{ clients|length }})</h3>
+      {% if proto.get('installed') %}
       <button type="button" class="btn btn-primary btn-sm"
               onclick="openAddClientModal('{{ proto_key }}')">+ Add User</button>
+      {% endif %}
     </div>
 
     {% if clients %}

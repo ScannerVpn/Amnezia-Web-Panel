@@ -23,41 +23,65 @@ echo ""
 
 # Check root
 if [ "$EUID" -ne 0 ]; then
-  error "لطفاً با root اجرا کنید: sudo bash install.sh"
+  error "Please run as root: sudo bash install.sh"
 fi
 
 INSTALL_DIR="/opt/amnezia-panel"
 PANEL_PORT="${PANEL_PORT:-54325}"
 REPO="https://github.com/ScannerVpn/Amnezia-Web-Panel"
 
-# Install dependencies
-info "نصب وابستگی‌ها..."
+# Install base dependencies
+info "Installing dependencies..."
 apt-get update -qq
 apt-get install -y -qq curl git ca-certificates
 
 # Install Docker
 if ! command -v docker &>/dev/null; then
-  info "نصب Docker..."
+  info "Installing Docker..."
   curl -fsSL https://get.docker.com | bash
   systemctl enable docker
   systemctl start docker
-  success "Docker نصب شد"
+  success "Docker installed"
 else
-  success "Docker از قبل نصب است"
+  success "Docker already installed"
 fi
 
-# Install Docker Compose plugin
-if ! docker compose version &>/dev/null; then
-  info "نصب Docker Compose..."
-  apt-get install -y -qq docker-compose-plugin
+# Install Docker Compose (plugin or standalone fallback)
+install_compose() {
+  # Try plugin via apt first (Ubuntu 22.04+ with Docker repo)
+  if apt-get install -y -qq docker-compose-plugin 2>/dev/null; then
+    success "Docker Compose plugin installed"
+    return 0
+  fi
+
+  # Fallback: download standalone binary from GitHub
+  info "Downloading Docker Compose standalone binary..."
+  COMPOSE_VERSION=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest \
+    | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+  ARCH=$(uname -m)
+  curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
+    -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+
+  # Create shim so "docker compose" (space) works too
+  mkdir -p /usr/local/lib/docker/cli-plugins
+  ln -sf /usr/local/bin/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+  success "Docker Compose ${COMPOSE_VERSION} installed"
+}
+
+if ! docker compose version &>/dev/null 2>&1; then
+  info "Installing Docker Compose..."
+  install_compose
+else
+  success "Docker Compose already available"
 fi
 
 # Clone or update repo
 if [ -d "$INSTALL_DIR/.git" ]; then
-  info "به‌روزرسانی پنل..."
+  info "Updating panel from GitHub..."
   git -C "$INSTALL_DIR" pull --quiet
 else
-  info "دانلود پنل از GitHub..."
+  info "Cloning panel from GitHub..."
   git clone --quiet "$REPO" "$INSTALL_DIR"
 fi
 
@@ -65,7 +89,7 @@ cd "$INSTALL_DIR"
 
 # Create .env if not exists
 if [ ! -f ".env" ]; then
-  info "ایجاد فایل تنظیمات..."
+  info "Generating configuration..."
   ADMIN_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16)
   SECRET_KEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 64)
 
@@ -76,10 +100,10 @@ SECRET_KEY=${SECRET_KEY}
 PANEL_PORT=${PANEL_PORT}
 DATA_DIR=/app/data
 EOF
-  success "فایل .env ایجاد شد"
+  success ".env file created"
 else
   ADMIN_PASS=$(grep ADMIN_PASSWORD .env | cut -d= -f2)
-  warn "فایل .env از قبل وجود دارد — استفاده از تنظیمات موجود"
+  warn ".env already exists — using existing credentials"
 fi
 
 # Create data directory
@@ -89,11 +113,11 @@ mkdir -p data
 docker compose down 2>/dev/null || true
 
 # Build and start
-info "ساخت و راه‌اندازی پنل..."
+info "Building and starting the panel..."
 docker compose up -d --build
 
-# Wait for container to be healthy
-info "منتظر راه‌اندازی پنل..."
+# Wait for panel to be ready
+info "Waiting for panel to start..."
 for i in $(seq 1 30); do
   if curl -sf "http://localhost:${PANEL_PORT}/login" &>/dev/null; then
     break
@@ -102,18 +126,18 @@ for i in $(seq 1 30); do
 done
 
 # Get server IP
-SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║       پنل با موفقیت نصب شد! ✅       ║${NC}"
+echo -e "${GREEN}║    Panel installed successfully! ✅   ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${CYAN}آدرس پنل:${NC}     http://${SERVER_IP}:${PANEL_PORT}"
-echo -e "  ${CYAN}نام کاربری:${NC}   admin"
-echo -e "  ${CYAN}رمز عبور:${NC}    ${ADMIN_PASS}"
+echo -e "  ${CYAN}Panel URL:${NC}   http://${SERVER_IP}:${PANEL_PORT}"
+echo -e "  ${CYAN}Username:${NC}    admin"
+echo -e "  ${CYAN}Password:${NC}    ${ADMIN_PASS}"
 echo ""
-echo -e "  ${YELLOW}⚠️  رمز عبور را در مکان امنی ذخیره کنید${NC}"
+echo -e "  ${YELLOW}WARNING: Save your password in a safe place!${NC}"
 echo ""
-echo -e "  برای به‌روزرسانی: cd ${INSTALL_DIR} && git pull && docker compose up -d --build"
+echo -e "  To update: cd ${INSTALL_DIR} && git pull && docker compose up -d --build"
 echo ""

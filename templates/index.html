@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}داشبورد — Amnezia Panel{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">داشبورد</h1>
+  <button class="btn btn-primary" onclick="openAddServerModal()">
+    <span>+</span> افزودن سرور
+  </button>
+</div>
+
+{% if not servers %}
+<div class="empty-state">
+  <div class="empty-icon">🖥️</div>
+  <h2>سروری وجود ندارد</h2>
+  <p>اولین سرور VPN خود را اضافه کنید</p>
+  <button class="btn btn-primary" onclick="openAddServerModal()">افزودن سرور</button>
+</div>
+{% else %}
+<div class="servers-grid">
+  {% for server in servers %}
+  <div class="server-card" id="card-{{ server.id }}">
+    <div class="server-card-header">
+      <div class="server-info">
+        <h3 class="server-name">{{ server.name }}</h3>
+        <span class="server-host">{{ server.host }}:{{ server.ssh_port }}</span>
+      </div>
+      <div class="server-actions">
+        <button class="btn-icon" title="پینگ" onclick="pingServer('{{ server.id }}')">📡</button>
+        <button class="btn-icon" title="ری‌استارت" onclick="rebootServer('{{ server.id }}')">🔄</button>
+        <button class="btn-icon btn-danger" title="حذف" onclick="deleteServer('{{ server.id }}', '{{ server.name }}')">🗑️</button>
+      </div>
+    </div>
+
+    <div class="server-ping" id="ping-{{ server.id }}">
+      <span class="ping-dot"></span>
+      <span class="ping-text">در حال بررسی...</span>
+    </div>
+
+    <div class="protocols-grid">
+      {% for proto_key, proto_label, proto_emoji in [
+        ('awg', 'AmneziaWG', '🔒'),
+        ('wireguard', 'WireGuard', '🔑'),
+        ('xray', 'Xray Reality', '⚡'),
+        ('openvpn', 'OpenVPN', '🌐')
+      ] %}
+      {% set proto = server.protocols.get(proto_key, {}) %}
+      <div class="protocol-badge {% if proto.get('installed') %}installed{% endif %}">
+        <span>{{ proto_emoji }}</span>
+        <span>{{ proto_label }}</span>
+        {% if proto.get('installed') %}
+        <span class="badge-dot green"></span>
+        {% else %}
+        <span class="badge-dot gray"></span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="server-stats">
+      {% set total_clients = namespace(n=0) %}
+      {% for protocol_clients in server.clients.values() %}
+        {% set total_clients.n = total_clients.n + protocol_clients|length %}
+      {% endfor %}
+      <span>👥 {{ total_clients.n }} کاربر</span>
+    </div>
+
+    <a href="/server/{{ server.id }}" class="btn btn-outline btn-block">مدیریت سرور</a>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Add Server Modal -->
+<div id="add-server-modal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>افزودن سرور جدید</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form id="add-server-form" onsubmit="submitAddServer(event)">
+      <div class="form-grid">
+        <div class="form-group">
+          <label>نام سرور</label>
+          <input type="text" name="name" placeholder="سرور آلمان" required />
+        </div>
+        <div class="form-group">
+          <label>آدرس IP</label>
+          <input type="text" name="host" placeholder="1.2.3.4" required />
+        </div>
+        <div class="form-group">
+          <label>پورت SSH</label>
+          <input type="number" name="ssh_port" value="22" min="1" max="65535" />
+        </div>
+        <div class="form-group">
+          <label>نام کاربری</label>
+          <input type="text" name="username" value="root" required />
+        </div>
+        <div class="form-group form-full">
+          <label>رمز عبور SSH</label>
+          <input type="password" name="password" placeholder="رمز عبور یا کلید SSH" />
+        </div>
+        <div class="form-group form-full">
+          <label>کلید SSH (اختیاری)</label>
+          <textarea name="ssh_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows="4"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">انصراف</button>
+        <button type="submit" class="btn btn-primary" id="add-server-btn">
+          <span id="add-server-spinner" class="spinner hidden"></span>
+          افزودن و اتصال
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  {% for server in servers %}
+  pingServer('{{ server.id }}', true);
+  {% endfor %}
+});
+
+function openAddServerModal() {
+  document.getElementById('add-server-modal').classList.remove('hidden');
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+async function submitAddServer(e) {
+  e.preventDefault();
+  const form = e.target;
+  const btn = document.getElementById('add-server-btn');
+  const spinner = document.getElementById('add-server-spinner');
+  btn.disabled = true;
+  spinner.classList.remove('hidden');
+
+  const data = Object.fromEntries(new FormData(form));
+  data.ssh_port = parseInt(data.ssh_port) || 22;
+
+  try {
+    const res = await fetch('/api/servers', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (json.success) {
+      showToast('سرور با موفقیت اضافه شد', 'success');
+      setTimeout(() => location.reload(), 800);
+    } else {
+      showToast(json.error || 'خطا در اتصال', 'error');
+    }
+  } catch (err) {
+    showToast('خطای شبکه', 'error');
+  }
+  btn.disabled = false;
+  spinner.classList.add('hidden');
+}
+
+async function pingServer(id, silent = false) {
+  const el = document.getElementById(`ping-${id}`);
+  if (!el) return;
+  if (!silent) el.innerHTML = '<span class="ping-dot pulsing"></span><span class="ping-text">در حال پینگ...</span>';
+
+  const res = await fetch(`/api/servers/${id}/ping`, {method: 'POST'});
+  const data = await res.json();
+  if (data.success) {
+    el.innerHTML = `<span class="ping-dot green"></span><span class="ping-text">${data.latency_ms}ms</span>`;
+  } else {
+    el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text">آفلاین</span>`;
+  }
+}
+
+async function deleteServer(id, name) {
+  if (!confirm(`آیا از حذف سرور "${name}" مطمئن هستید؟`)) return;
+  const res = await fetch(`/api/servers/${id}`, {method: 'DELETE'});
+  const data = await res.json();
+  if (data.success) {
+    document.getElementById(`card-${id}`).remove();
+    showToast('سرور حذف شد', 'success');
+  }
+}
+
+async function rebootServer(id) {
+  if (!confirm('سرور ری‌استارت شود؟')) return;
+  await fetch(`/api/servers/${id}/reboot`, {method: 'POST'});
+  showToast('دستور ری‌استارت ارسال شد', 'success');
+}
+</script>
+{% endblock %}

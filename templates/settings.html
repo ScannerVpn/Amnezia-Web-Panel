@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}تنظیمات — Amnezia Panel{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">⚙️ تنظیمات</h1>
+</div>
+
+<div class="settings-grid">
+  <!-- Change Password -->
+  <div class="card">
+    <div class="card-header">
+      <h2>تغییر رمز عبور</h2>
+    </div>
+    <form onsubmit="changePassword(event)">
+      <div class="form-group">
+        <label>رمز عبور فعلی</label>
+        <input type="password" id="current-password" required />
+      </div>
+      <div class="form-group">
+        <label>رمز عبور جدید</label>
+        <input type="password" id="new-password" required minlength="8" />
+      </div>
+      <div class="form-group">
+        <label>تکرار رمز عبور جدید</label>
+        <input type="password" id="confirm-password" required />
+      </div>
+      <button type="submit" class="btn btn-primary">ذخیره رمز عبور</button>
+    </form>
+  </div>
+
+  <!-- Panel Info -->
+  <div class="card">
+    <div class="card-header">
+      <h2>اطلاعات پنل</h2>
+    </div>
+    <div class="info-list">
+      <div class="info-item">
+        <span class="info-label">نسخه</span>
+        <span class="info-value">{{ version }}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">نام کاربری ادمین</span>
+        <span class="info-value">{{ panel.admin_username }}</span>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function changePassword(e) {
+  e.preventDefault();
+  const current = document.getElementById('current-password').value;
+  const newPw = document.getElementById('new-password').value;
+  const confirm = document.getElementById('confirm-password').value;
+
+  if (newPw !== confirm) {
+    showToast('رمزهای جدید یکسان نیستند', 'error');
+    return;
+  }
+
+  const res = await fetch('/api/settings/password', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({current_password: current, new_password: newPw}),
+  });
+  const data = await res.json();
+  if (data.success) {
+    showToast('رمز عبور تغییر کرد', 'success');
+    e.target.reset();
+  } else {
+    showToast(data.error || 'خطا', 'error');
+  }
+}
+</script>
+{% endblock %}

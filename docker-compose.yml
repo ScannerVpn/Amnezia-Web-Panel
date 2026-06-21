@@ -1,0 +1,14 @@
+services:
+  amnezia-panel:
+    build: .
+    container_name: amnezia-panel
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT:-54325}:54325"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+      - PANEL_PORT=54325

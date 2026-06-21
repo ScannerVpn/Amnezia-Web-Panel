@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ورود — Amnezia Panel</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-container">
+    <div class="login-logo">
+      <span style="font-size:3rem">🛡️</span>
+      <h1>Amnezia Panel</h1>
+      <p>پنل مدیریت VPN</p>
+    </div>
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <form class="login-form" method="POST" action="/login">
+      <div class="form-group">
+        <label>نام کاربری</label>
+        <input type="text" name="username" placeholder="admin" required autofocus />
+      </div>
+      <div class="form-group">
+        <label>رمز عبور</label>
+        <input type="password" name="password" placeholder="••••••••" required />
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">ورود به پنل</button>
+    </form>
+  </div>
+</body>
+</html>

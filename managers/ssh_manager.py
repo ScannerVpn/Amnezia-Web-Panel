@@ -1,0 +1,139 @@
+import paramiko
+import logging
+import io
+from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+class SSHManager:
+    def __init__(self, host: str, port: int, username: str,
+                 password: str = None, key_data: str = None):
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.key_data = key_data
+        self._client: Optional[paramiko.SSHClient] = None
+        self._is_root = (username == "root")
+
+    def connect(self) -> None:
+        self._client = paramiko.SSHClient()
+        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        kwargs = {
+            "hostname": self.host,
+            "port": self.port,
+            "username": self.username,
+            "timeout": 15,
+            "banner_timeout": 30,
+            "auth_timeout": 30,
+        }
+
+        if self.key_data:
+            for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey]:
+                try:
+                    key = key_class.from_private_key(io.StringIO(self.key_data))
+                    kwargs["pkey"] = key
+                    break
+                except Exception:
+                    continue
+        elif self.password:
+            kwargs["password"] = self.password
+
+        self._client.connect(**kwargs)
+
+    def disconnect(self) -> None:
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, *args):
+        self.disconnect()
+
+    def run_command(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
+        stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+        stdout.channel.settimeout(timeout)
+        out = stdout.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+        err = stderr.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+        code = stdout.channel.recv_exit_status()
+        return out, err, code
+
+    def run_sudo(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
+        if self._is_root:
+            return self.run_command(command, timeout)
+        command = command.removeprefix("sudo").strip()
+        pw = (self.password or "").replace("'", "'\\''")
+        return self.run_command(f"echo '{pw}' | sudo -S -p '' {command}", timeout)
+
+    def run_sudo_script(self, script: str, timeout: int = 300) -> Tuple[str, str, int]:
+        import hashlib
+        h = hashlib.md5(script.encode()).hexdigest()[:8]
+        tmp = f"/tmp/.script_{h}.sh"
+        self.upload_file(script, tmp)
+        self.run_sudo(f"chmod +x {tmp}")
+        out, err, code = self.run_sudo(f"bash {tmp}", timeout)
+        self.run_command(f"rm -f {tmp}")
+        return out, err, code
+
+    def upload_file(self, content: str, remote_path: str) -> None:
+        sftp = self._client.open_sftp()
+        try:
+            content = content.replace("\r\n", "\n")
+            with sftp.open(remote_path, "w") as f:
+                f.write(content)
+        finally:
+            sftp.close()
+
+    def upload_sudo_file(self, content: str, remote_path: str) -> None:
+        import hashlib
+        h = hashlib.md5(remote_path.encode()).hexdigest()[:8]
+        tmp = f"/tmp/.upload_{h}"
+        self.upload_file(content, tmp)
+        self.run_sudo(f"mv {tmp} {remote_path} && chmod 600 {remote_path}")
+
+    def download_file(self, remote_path: str) -> str:
+        sftp = self._client.open_sftp()
+        try:
+            with sftp.open(remote_path, "r") as f:
+                return f.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+        finally:
+            sftp.close()
+
+    def file_exists(self, remote_path: str) -> bool:
+        sftp = self._client.open_sftp()
+        try:
+            sftp.stat(remote_path)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            sftp.close()
+
+    def test_connection(self) -> dict:
+        try:
+            self.connect()
+            out, _, code = self.run_command("uname -sr && cat /etc/os-release | grep PRETTY_NAME")
+            self.disconnect()
+            return {"success": code == 0, "info": out.strip()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def ping(self) -> dict:
+        import time
+        try:
+            start = time.time()
+            self.connect()
+            self.run_command("echo ok")
+            self.disconnect()
+            latency = round((time.time() - start) * 1000)
+            return {"success": True, "latency_ms": latency}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

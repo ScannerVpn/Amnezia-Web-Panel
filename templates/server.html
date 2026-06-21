@@ -1,0 +1,453 @@
+{% extends "base.html" %}
+{% block title %}{{ server.name }} — Amnezia Panel{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="/" class="back-link">← داشبورد</a>
+    <h1 class="page-title">{{ server.name }}</h1>
+    <span class="server-host-label">{{ server.host }} | {{ server.username }}@{{ server.host }}:{{ server.ssh_port }}</span>
+  </div>
+  <div class="header-actions">
+    <button class="btn btn-outline" onclick="syncTraffic()">🔄 همگام‌سازی ترافیک</button>
+    <button class="btn btn-outline" onclick="detectExternal()">🔍 شناسایی کانفیگ‌های Amnezia</button>
+  </div>
+</div>
+
+<!-- Protocol Tabs -->
+<div class="tabs">
+  {% for proto_key, proto_label, proto_emoji in [
+    ('awg', 'AmneziaWG', '🔒'),
+    ('wireguard', 'WireGuard', '🔑'),
+    ('xray', 'Xray Reality', '⚡'),
+    ('openvpn', 'OpenVPN', '🌐')
+  ] %}
+  <button class="tab-btn {% if loop.first %}active{% endif %}" onclick="switchTab('{{ proto_key }}', this)">
+    {{ proto_emoji }} {{ proto_label }}
+  </button>
+  {% endfor %}
+</div>
+
+{% for proto_key, proto_label, proto_emoji, proto_desc in [
+  ('awg', 'AmneziaWG', '🔒', 'WireGuard با obfuscation ضد سانسور — مناسب ایران'),
+  ('wireguard', 'WireGuard', '🔑', 'VPN سریع و مدرن بدون obfuscation'),
+  ('xray', 'Xray Reality', '⚡', 'تقلید ترافیک HTTPS — دشوارترین تشخیص برای سانسور'),
+  ('openvpn', 'OpenVPN', '🌐', 'پروتکل قدیمی‌تر با پشتیبانی گسترده')
+] %}
+{% set proto = server.protocols.get(proto_key, {}) %}
+{% set clients = server.clients.get(proto_key, {}) %}
+
+<div id="tab-{{ proto_key }}" class="tab-content {% if not loop.first %}hidden{% endif %}">
+  <!-- Protocol Header -->
+  <div class="protocol-header">
+    <div class="protocol-info">
+      <span class="protocol-emoji">{{ proto_emoji }}</span>
+      <div>
+        <h2>{{ proto_label }}</h2>
+        <p>{{ proto_desc }}</p>
+      </div>
+    </div>
+    <div class="protocol-status">
+      {% if proto.get('installed') %}
+      <span class="status-badge installed">
+        <span class="status-dot green"></span> نصب شده
+        {% if proto.get('port') %} | پورت {{ proto.port }}{% endif %}
+      </span>
+      <button class="btn btn-danger btn-sm" onclick="uninstallProtocol('{{ proto_key }}', '{{ proto_label }}')">
+        حذف پروتکل
+      </button>
+      {% else %}
+      <span class="status-badge not-installed">
+        <span class="status-dot gray"></span> نصب نشده
+      </span>
+      <button class="btn btn-primary btn-sm" onclick="openInstallModal('{{ proto_key }}', '{{ proto_label }}')">
+        نصب پروتکل
+      </button>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if proto.get('installed') %}
+  <!-- Clients Section -->
+  <div class="clients-section">
+    <div class="clients-header">
+      <h3>کاربران ({{ clients|length }})</h3>
+      <button class="btn btn-primary btn-sm" onclick="openAddClientModal('{{ proto_key }}')">
+        + افزودن کاربر
+      </button>
+    </div>
+
+    {% if clients %}
+    <div class="table-wrapper">
+      <table class="clients-table">
+        <thead>
+          <tr>
+            <th>نام</th>
+            {% if proto_key in ('awg', 'wireguard') %}
+            <th>IP</th>
+            {% endif %}
+            <th>ترافیک مصرفی</th>
+            {% if proto_key in ('awg', 'wireguard') %}
+            <th>محدودیت</th>
+            {% endif %}
+            <th>آخرین اتصال</th>
+            <th>وضعیت</th>
+            <th>منبع</th>
+            <th>عملیات</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for client_id, client in clients.items() %}
+          <tr id="client-row-{{ client_id }}" class="{% if not client.enabled %}disabled-row{% endif %}">
+            <td>
+              <span class="client-name">{{ client.name }}</span>
+            </td>
+            {% if proto_key in ('awg', 'wireguard') %}
+            <td><code>{{ client.get('ip', '—') }}</code></td>
+            {% endif %}
+            <td>
+              <div class="traffic-info">
+                <span>↓ {{ bytes_to_human(client.traffic_rx | int) }}</span>
+                <span>↑ {{ bytes_to_human(client.traffic_tx | int) }}</span>
+              </div>
+              {% if client.traffic_limit_bytes %}
+              {% set used_pct = ((client.traffic_rx + client.traffic_tx) / client.traffic_limit_bytes * 100) | int %}
+              <div class="traffic-bar">
+                <div class="traffic-fill {% if used_pct > 90 %}danger{% elif used_pct > 70 %}warning{% endif %}"
+                     style="width: {{ [used_pct, 100]|min }}%"></div>
+              </div>
+              <small>{{ used_pct }}%</small>
+              {% endif %}
+            </td>
+            {% if proto_key in ('awg', 'wireguard') %}
+            <td>
+              {% if client.traffic_limit_bytes %}
+              {{ bytes_to_human(client.traffic_limit_bytes | int) }}
+              {% else %}
+              <span class="muted">نامحدود</span>
+              {% endif %}
+            </td>
+            {% endif %}
+            <td>
+              {% if client.last_seen %}
+              <span class="last-seen" title="{{ client.last_seen }}">{{ client.last_seen[:10] }}</span>
+              {% else %}
+              <span class="muted">هرگز</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if proto_key in ('awg', 'wireguard') %}
+              <button class="toggle-btn {% if client.enabled %}enabled{% else %}disabled{% endif %}"
+                      onclick="toggleClient('{{ proto_key }}', '{{ client_id }}', this)"
+                      title="{% if client.enabled %}غیرفعال کن{% else %}فعال کن{% endif %}">
+                {% if client.enabled %}✅{% else %}❌{% endif %}
+              </button>
+              {% else %}
+              <span class="status-dot {% if client.enabled %}green{% else %}gray{% endif %}"></span>
+              {% endif %}
+            </td>
+            <td>
+              {% if client.source == 'amnezia_app' %}
+              <span class="source-badge amnezia">📱 Amnezia App</span>
+              {% else %}
+              <span class="source-badge panel">🖥️ پنل</span>
+              {% endif %}
+            </td>
+            <td>
+              <div class="action-buttons">
+                {% if proto_key in ('awg', 'wireguard', 'xray') %}
+                <button class="btn-icon" title="دانلود کانفیگ"
+                        onclick="downloadConfig('{{ proto_key }}', '{{ client_id }}', '{{ client.name }}')">📥</button>
+                <button class="btn-icon" title="کد QR"
+                        onclick="showQR('{{ proto_key }}', '{{ client_id }}', '{{ client.name }}')">📱</button>
+                {% elif proto_key == 'openvpn' %}
+                <button class="btn-icon" title="دانلود OVPN"
+                        onclick="downloadConfig('{{ proto_key }}', '{{ client_id }}', '{{ client.name }}')">📥</button>
+                {% endif %}
+                <button class="btn-icon btn-danger" title="حذف کاربر"
+                        onclick="deleteClient('{{ proto_key }}', '{{ client_id }}', '{{ client.name }}')">🗑️</button>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty-clients">
+      <p>هنوز کاربری اضافه نشده است</p>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<!-- Install Protocol Modal -->
+<div id="install-modal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2 id="install-modal-title">نصب پروتکل</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div id="install-modal-body">
+      <!-- Filled by JS -->
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-ghost" onclick="closeModal()">انصراف</button>
+      <button id="install-confirm-btn" class="btn btn-primary" onclick="confirmInstall()">
+        <span id="install-spinner" class="spinner hidden"></span>
+        نصب
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Client Modal -->
+<div id="add-client-modal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>افزودن کاربر جدید</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitAddClient(event)">
+      <div class="form-group">
+        <label>نام کاربر</label>
+        <input type="text" id="new-client-name" placeholder="user1" required />
+      </div>
+      <div class="form-group">
+        <label>محدودیت ترافیک (گیگابایت، ۰ = نامحدود)</label>
+        <input type="number" id="new-client-limit" value="0" min="0" />
+      </div>
+      <input type="hidden" id="new-client-protocol" />
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">انصراف</button>
+        <button type="submit" class="btn btn-primary" id="add-client-btn">
+          <span id="add-client-spinner" class="spinner hidden"></span>
+          افزودن
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- QR Modal -->
+<div id="qr-modal" class="modal hidden">
+  <div class="modal-content modal-narrow">
+    <div class="modal-header">
+      <h2 id="qr-modal-title">کد QR</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="qr-container">
+      <img id="qr-image" src="" alt="QR Code" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-block" onclick="closeModal()">بستن</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SERVER_ID = '{{ server.id }}';
+let currentProtocol = null;
+
+function switchTab(proto, btn) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById(`tab-${proto}`).classList.remove('hidden');
+  btn.classList.add('active');
+}
+
+function openInstallModal(proto, label) {
+  currentProtocol = proto;
+  document.getElementById('install-modal-title').textContent = `نصب ${label}`;
+
+  const bodies = {
+    awg: `
+      <div class="form-group"><label>پورت UDP</label><input type="number" id="p-port" value="51820" /></div>
+      <div class="form-group"><label>زیرشبکه</label><input type="text" id="p-subnet" value="10.8.1.0/24" /></div>
+      <div class="form-group"><label>DNS</label><input type="text" id="p-dns" value="1.1.1.1" /></div>
+    `,
+    wireguard: `
+      <div class="form-group"><label>پورت UDP</label><input type="number" id="p-port" value="51820" /></div>
+      <div class="form-group"><label>زیرشبکه</label><input type="text" id="p-subnet" value="10.8.0.0/24" /></div>
+      <div class="form-group"><label>DNS</label><input type="text" id="p-dns" value="1.1.1.1" /></div>
+    `,
+    xray: `
+      <div class="form-group"><label>پورت</label><input type="number" id="p-port" value="443" /></div>
+      <div class="form-group"><label>دامنه مقصد (Reality SNI)</label><input type="text" id="p-dest" value="www.microsoft.com" /></div>
+    `,
+    openvpn: `
+      <div class="form-group"><label>پورت UDP</label><input type="number" id="p-port" value="1194" /></div>
+      <div class="form-group"><label>DNS</label><input type="text" id="p-dns" value="1.1.1.1" /></div>
+    `,
+  };
+
+  document.getElementById('install-modal-body').innerHTML = bodies[proto] || '';
+  document.getElementById('install-modal').classList.remove('hidden');
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+async function confirmInstall() {
+  const btn = document.getElementById('install-confirm-btn');
+  const spinner = document.getElementById('install-spinner');
+  btn.disabled = true;
+  spinner.classList.remove('hidden');
+
+  const body = { port: parseInt(document.getElementById('p-port')?.value) };
+  if (document.getElementById('p-subnet')) body.subnet = document.getElementById('p-subnet').value;
+  if (document.getElementById('p-dns')) body.dns = document.getElementById('p-dns').value;
+  if (document.getElementById('p-dest')) body.dest_domain = document.getElementById('p-dest').value;
+
+  try {
+    const res = await fetch(`/api/servers/${SERVER_ID}/protocols/${currentProtocol}/install`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('پروتکل با موفقیت نصب شد', 'success');
+      setTimeout(() => location.reload(), 1000);
+    } else {
+      showToast(data.error || 'خطا در نصب', 'error');
+    }
+  } catch (e) {
+    showToast('خطای شبکه', 'error');
+  }
+  btn.disabled = false;
+  spinner.classList.add('hidden');
+}
+
+async function uninstallProtocol(proto, label) {
+  if (!confirm(`آیا از حذف ${label} مطمئن هستید؟ تمام کاربران حذف خواهند شد.`)) return;
+  const res = await fetch(`/api/servers/${SERVER_ID}/protocols/${proto}/uninstall`, {method: 'POST'});
+  const data = await res.json();
+  if (data.success) {
+    showToast('پروتکل حذف شد', 'success');
+    setTimeout(() => location.reload(), 800);
+  } else {
+    showToast(data.error || 'خطا', 'error');
+  }
+}
+
+function openAddClientModal(proto) {
+  document.getElementById('new-client-protocol').value = proto;
+  document.getElementById('new-client-name').value = '';
+  document.getElementById('new-client-limit').value = '0';
+  document.getElementById('add-client-modal').classList.remove('hidden');
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+async function submitAddClient(e) {
+  e.preventDefault();
+  const proto = document.getElementById('new-client-protocol').value;
+  const name = document.getElementById('new-client-name').value;
+  const limit = parseInt(document.getElementById('new-client-limit').value) || 0;
+  const btn = document.getElementById('add-client-btn');
+  const spinner = document.getElementById('add-client-spinner');
+
+  btn.disabled = true;
+  spinner.classList.remove('hidden');
+
+  const res = await fetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, traffic_limit_gb: limit}),
+  });
+  const data = await res.json();
+  btn.disabled = false;
+  spinner.classList.add('hidden');
+
+  if (data.success) {
+    showToast('کاربر اضافه شد', 'success');
+    closeModal();
+    setTimeout(() => location.reload(), 800);
+  } else {
+    showToast(data.error || 'خطا', 'error');
+  }
+}
+
+async function toggleClient(proto, clientId, btn) {
+  const res = await fetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/toggle`, {method: 'POST'});
+  const data = await res.json();
+  if (data.success) {
+    const row = document.getElementById(`client-row-${clientId}`);
+    if (data.enabled) {
+      btn.textContent = '✅';
+      btn.classList.remove('disabled');
+      btn.classList.add('enabled');
+      row.classList.remove('disabled-row');
+    } else {
+      btn.textContent = '❌';
+      btn.classList.remove('enabled');
+      btn.classList.add('disabled');
+      row.classList.add('disabled-row');
+    }
+  }
+}
+
+function downloadConfig(proto, clientId, name) {
+  window.location.href = `/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/config`;
+}
+
+async function showQR(proto, clientId, name) {
+  document.getElementById('qr-modal-title').textContent = `کد QR — ${name}`;
+  document.getElementById('qr-image').src = `/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/qr`;
+  document.getElementById('qr-modal').classList.remove('hidden');
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+async function deleteClient(proto, clientId, name) {
+  if (!confirm(`کاربر "${name}" حذف شود؟`)) return;
+  const res = await fetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}`, {method: 'DELETE'});
+  const data = await res.json();
+  if (data.success) {
+    document.getElementById(`client-row-${clientId}`).remove();
+    showToast('کاربر حذف شد', 'success');
+  } else {
+    showToast(data.error || 'خطا', 'error');
+  }
+}
+
+async function syncTraffic() {
+  showToast('در حال همگام‌سازی...', 'info');
+  const res = await fetch(`/api/servers/${SERVER_ID}/sync-traffic`, {method: 'POST'});
+  const data = await res.json();
+  if (data.success) {
+    showToast('ترافیک همگام شد', 'success');
+    setTimeout(() => location.reload(), 800);
+  } else {
+    showToast(data.error || 'خطا', 'error');
+  }
+}
+
+async function detectExternal() {
+  showToast('در حال بررسی سرور...', 'info');
+  const res = await fetch(`/api/servers/${SERVER_ID}/detect-external`, {method: 'POST'});
+  const data = await res.json();
+  if (data.success) {
+    const total = Object.values(data.external).flat().length;
+    if (total === 0) {
+      showToast('کانفیگ خارجی یافت نشد', 'info');
+    } else {
+      showToast(`${total} کانفیگ Amnezia یافت شد — صفحه رفرش می‌شود`, 'success');
+      // Auto-import external peers
+      for (const [proto, peers] of Object.entries(data.external)) {
+        for (const pubKey of peers) {
+          await fetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${pubKey}/import`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: `External (${pubKey.slice(0,8)})`}),
+          });
+        }
+      }
+      setTimeout(() => location.reload(), 1200);
+    }
+  }
+}
+</script>
+{% endblock %}

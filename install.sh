@@ -85,7 +85,6 @@ cd "$INSTALL_DIR"
 # Create .env if not exists
 if [ ! -f ".env" ]; then
   info "Generating configuration..."
-  # Use openssl for cryptographically secure random values
   ADMIN_PASS=$(openssl rand -base64 12 | tr -d '/+=' | head -c 16)
   SECRET_KEY=$(openssl rand -hex 32)
 
@@ -95,6 +94,8 @@ ADMIN_PASSWORD=${ADMIN_PASS}
 SECRET_KEY=${SECRET_KEY}
 PANEL_PORT=${PANEL_PORT}
 DATA_DIR=/app/data
+# Set to 1 to run git pull automatically on each container start
+UPDATE_ON_START=0
 EOF
   chmod 600 .env
   success ".env file created (mode 600)"
@@ -107,6 +108,35 @@ fi
 mkdir -p data
 chmod 700 data
 
+# ── Open firewall port ────────────────────────────────────────────────────────
+open_port() {
+  local port=$1
+  info "Opening port ${port}/tcp in firewall..."
+  # ufw
+  if command -v ufw &>/dev/null; then
+    ufw allow "${port}/tcp" 2>/dev/null && success "ufw: port ${port}/tcp allowed" || true
+  fi
+  # firewalld
+  if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --add-port="${port}/tcp" 2>/dev/null && \
+    firewall-cmd --reload 2>/dev/null && \
+    success "firewalld: port ${port}/tcp allowed" || true
+  fi
+  # iptables fallback
+  if command -v iptables &>/dev/null; then
+    iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
+    # Persist iptables rules
+    if command -v iptables-save &>/dev/null; then
+      mkdir -p /etc/iptables
+      iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+      success "iptables: port ${port}/tcp allowed (persisted)"
+    fi
+  fi
+}
+
+open_port "${PANEL_PORT}"
+
 # Stop existing container
 docker compose down 2>/dev/null || true
 
@@ -116,12 +146,19 @@ docker compose up -d --build
 
 # Wait for panel to be ready
 info "Waiting for panel to start..."
+READY=0
 for i in $(seq 1 30); do
   if curl -sf "http://localhost:${PANEL_PORT}/login" &>/dev/null; then
+    READY=1
     break
   fi
   sleep 2
 done
+
+if [ "$READY" -eq 0 ]; then
+  warn "Panel did not respond on port ${PANEL_PORT} within 60s."
+  warn "Check logs with: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs"
+fi
 
 # Get server IPv4 address (force -4 to avoid IPv6)
 SERVER_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || \
@@ -142,6 +179,23 @@ Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
 chmod 600 "$CREDS_FILE"
 
+# ── Create update helper script ───────────────────────────────────────────────
+cat > /usr/local/bin/amnezia-update <<'UPDATESCRIPT'
+#!/bin/bash
+# Amnezia Web Panel — update helper
+# Usage: amnezia-update
+set -e
+INSTALL_DIR="/opt/amnezia-panel"
+cd "$INSTALL_DIR"
+echo "[update] Pulling latest code from GitHub..."
+git pull
+echo "[update] Rebuilding and restarting container..."
+docker compose up -d --build
+echo "[update] Done. Panel is running."
+UPDATESCRIPT
+chmod +x /usr/local/bin/amnezia-update
+success "Update helper installed: run 'amnezia-update' anytime to update"
+
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║    Panel installed successfully! ✅   ║${NC}"
@@ -155,5 +209,6 @@ echo -e "  ${YELLOW}⚠  Credentials saved to:${NC} ${CREDS_FILE}"
 echo -e "  ${YELLOW}   View with: sudo cat ${CREDS_FILE}${NC}"
 echo -e "  ${YELLOW}   Delete after recording: sudo rm ${CREDS_FILE}${NC}"
 echo ""
-echo -e "  To update: cd ${INSTALL_DIR} && git pull && docker compose up -d --build"
+echo -e "  ${CYAN}To update the panel:${NC} amnezia-update"
+echo -e "  ${CYAN}To view logs:${NC}        docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f"
 echo ""

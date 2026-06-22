@@ -46,13 +46,27 @@ import crypto
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
-
 VERSION = "2.1.0"
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_FILE = DATA_DIR / "data.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Logging: console + persistent rotating file in DATA_DIR ──────────────────
+_LOG_FILE = DATA_DIR / "panel.log"
+_log_handlers: list[logging.Handler] = [
+    logging.StreamHandler(),
+]
+try:
+    from logging.handlers import RotatingFileHandler as _RFH
+    _file_handler = _RFH(str(_LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _log_handlers.append(_file_handler)
+except Exception:
+    pass  # If data dir not writable yet, log to console only
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                    handlers=_log_handlers)
+logger = logging.getLogger(__name__)
 
 DATA_LOCK = asyncio.Lock()
 INSTALL_TASKS: "OrderedDict[str, dict]" = OrderedDict()
@@ -256,10 +270,63 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
 
 
+class IPAllowlistMiddleware(BaseHTTPMiddleware):
+    """Block all requests from IPs not in the allowlist.
+    The allowlist is loaded from data.json on every request so changes apply
+    immediately without restart. If the allowlist is empty, all IPs are allowed."""
+
+    async def dispatch(self, request: Request, call_next):
+        # Health check always passes (needed for Docker healthcheck)
+        if request.url.path == "/api/health":
+            return await call_next(request)
+        try:
+            allowlist = _get_ip_allowlist()
+        except Exception:
+            allowlist = []
+        if not allowlist:
+            return await call_next(request)
+
+        client_ip = request.client.host if request.client else ""
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            client_ip = fwd.split(",")[0].strip()
+
+        import ipaddress
+        try:
+            client_addr = ipaddress.ip_address(client_ip)
+        except ValueError:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+        for entry in allowlist:
+            try:
+                if "/" in entry:
+                    if client_addr in ipaddress.ip_network(entry, strict=False):
+                        return await call_next(request)
+                else:
+                    if client_addr == ipaddress.ip_address(entry):
+                        return await call_next(request)
+            except ValueError:
+                continue
+
+        return JSONResponse({"error": "IP not allowed"}, status_code=403)
+
+
+def _get_ip_allowlist() -> list[str]:
+    """Read IP allowlist from data.json synchronously (for middleware use)."""
+    try:
+        if DATA_FILE.exists():
+            raw = json.loads(DATA_FILE.read_text())
+            return raw.get("panel", {}).get("ip_allowlist", [])
+    except Exception:
+        pass
+    return []
+
+
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(CSRFMiddleware)
+app.add_middleware(IPAllowlistMiddleware)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=86400 * 30)
 
 
@@ -1561,6 +1628,73 @@ async def settings_page(request: Request):
     return render(request, "settings.html", panel=data["panel"])
 
 
+@app.get("/api/health")
+async def health_check():
+    """Lightweight health endpoint for Docker healthcheck and monitoring."""
+    return JSONResponse({"status": "ok", "version": VERSION})
+
+
+@app.get("/api/settings/ip-allowlist")
+async def get_ip_allowlist(request: Request):
+    require_auth(request)
+    data = await load_data()
+    return JSONResponse({"allowlist": data["panel"].get("ip_allowlist", [])})
+
+
+@app.post("/api/settings/ip-allowlist")
+async def set_ip_allowlist(request: Request):
+    require_auth(request)
+    import ipaddress
+    try:
+        body = await request.json()
+        entries = body.get("allowlist", [])
+    except Exception:
+        return JSONResponse({"success": False, "error": "Invalid JSON"}, status_code=422)
+
+    if not isinstance(entries, list) or len(entries) > 100:
+        return JSONResponse({"success": False, "error": "allowlist must be a list (max 100)"}, status_code=422)
+
+    validated = []
+    for entry in entries:
+        entry = str(entry).strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                ipaddress.ip_network(entry, strict=False)
+            else:
+                ipaddress.ip_address(entry)
+            validated.append(entry)
+        except ValueError:
+            return JSONResponse({"success": False, "error": f"Invalid IP/CIDR: {entry}"}, status_code=422)
+
+    data = await load_data()
+    data["panel"]["ip_allowlist"] = validated
+    await save_data(data)
+    logger.info("IP allowlist updated: %s", validated or "DISABLED (all IPs allowed)")
+    return JSONResponse({"success": True, "allowlist": validated})
+
+
+@app.get("/api/logs")
+async def get_logs(request: Request):
+    """Return last N lines of the panel log file."""
+    require_auth(request)
+    lines_param = request.query_params.get("lines", "200")
+    try:
+        n = max(1, min(int(lines_param), 2000))
+    except ValueError:
+        n = 200
+    try:
+        log_path = DATA_DIR / "panel.log"
+        if not log_path.exists():
+            return JSONResponse({"lines": [], "error": "No log file yet"})
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        all_lines = text.splitlines()
+        return JSONResponse({"lines": all_lines[-n:]})
+    except Exception as e:
+        return JSONResponse({"lines": [], "error": str(e)})
+
+
 @app.post("/api/settings/password")
 async def change_password(request: Request):
     require_auth(request)
@@ -1590,7 +1724,8 @@ EXPECTED_REPO = "github.com/ScannerVpn/Amnezia-Web-Panel"
 async def update_panel(request: Request):
     require_auth(request)
     try:
-        # Verify remote URL before pulling
+        # /app/.git is mounted from the host repo, so git pull updates the host files
+        # directly (no rebuild needed for code changes — volumes are live-mounted).
         chk = subprocess.run(
             ["git", "-C", "/app", "remote", "get-url", "origin"],
             capture_output=True, text=True, timeout=10,
@@ -1601,13 +1736,18 @@ async def update_panel(request: Request):
                 "error": f"Refusing to update: remote URL is not {EXPECTED_REPO}",
             })
 
+        # Fetch first to detect what will change
+        subprocess.run(["git", "-C", "/app", "fetch", "origin"],
+                       capture_output=True, text=True, timeout=30)
+
         result = subprocess.run(
-            ["git", "-C", "/app", "pull"],
+            ["git", "-C", "/app", "pull", "--ff-only"],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
             return JSONResponse(
-                {"success": False, "error": result.stderr.strip() or "git pull failed"}
+                {"success": False, "error": result.stderr.strip() or "git pull failed — "
+                 "there may be local changes. Run: git -C /app reset --hard origin/main"}
             )
         output = result.stdout.strip()
         if "Already up to date" in output:
@@ -1617,17 +1757,31 @@ async def update_panel(request: Request):
 
         needs_rebuild = "requirements.txt" in output or "Dockerfile" in output
 
+        msg = output
+        if needs_rebuild:
+            msg += ("\n\nDockerfile or requirements.txt changed — a full rebuild is required.\n"
+                    "Run on the host: docker compose up -d --build")
+            # Write a flag file so operators know
+            try:
+                (DATA_DIR / ".needs_rebuild").write_text(
+                    f"Rebuild required after update at {datetime.now(timezone.utc).isoformat()}\n"
+                )
+            except Exception:
+                pass
+            return JSONResponse({
+                "success": True, "message": msg,
+                "restarting": False, "needs_rebuild": True,
+            })
+
+        # Code-only change: volumes are live-mounted, just restart uvicorn
         async def _restart():
             await asyncio.sleep(2)
             os.kill(os.getpid(), signal.SIGTERM)
 
         asyncio.create_task(_restart())
-        msg = output
-        if needs_rebuild:
-            msg += "\n\nrequirements.txt or Dockerfile changed. Run: docker compose up -d --build"
-
+        msg += "\n\nCode updated via mounted volume — restarting uvicorn now."
         return JSONResponse({"success": True, "message": msg,
-                             "restarting": not needs_rebuild, "needs_rebuild": needs_rebuild})
+                             "restarting": True, "needs_rebuild": False})
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)})
 

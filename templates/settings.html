@@ -51,9 +51,9 @@
   <div class="card">
     <div class="card-header"><h2>{{ t.update_panel|default('Update Panel') }}</h2></div>
     <p class="card-hint">
-      Pulls latest code from GitHub and restarts automatically.
-      If <code>requirements.txt</code> or <code>Dockerfile</code> changed, rebuild manually:
-      <code>docker compose up -d --build</code>
+      Pulls latest code from GitHub. Code-only changes apply after restart (no rebuild needed).
+      If <code>requirements.txt</code> or <code>Dockerfile</code> changed,
+      run on the host: <code>docker compose up -d --build</code>
     </p>
     <div id="update-output" class="update-output hidden"></div>
     <div class="update-actions">
@@ -66,6 +66,53 @@
       </button>
       <span id="update-status" class="update-status-text"></span>
     </div>
+  </div>
+
+  <!-- IP Allowlist -->
+  <div class="card">
+    <div class="card-header"><h2>🔒 IP Allowlist</h2></div>
+    <p class="card-hint">
+      Restrict panel access to specific IPs or CIDR ranges (e.g. <code>1.2.3.4</code> or
+      <code>10.0.0.0/8</code>). Leave empty to allow all IPs.
+      <strong>⚠️ Make sure your own IP is included before saving!</strong>
+    </p>
+    <div class="form-group">
+      <label for="allowlist-input">One IP or CIDR per line</label>
+      <textarea id="allowlist-input" rows="5"
+        placeholder="203.0.113.1&#10;10.0.0.0/8&#10;(leave empty = allow all IPs)"
+        style="font-family:monospace;width:100%;resize:vertical;background:var(--bg-secondary,#1e1e2e);color:inherit;border:1px solid var(--border,#333);border-radius:6px;padding:8px;box-sizing:border-box;"></textarea>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <button type="button" class="btn btn-outline" onclick="loadAllowlist()">Reload</button>
+      <button type="button" class="btn btn-primary" id="save-allowlist-btn" onclick="saveAllowlist()">
+        <span id="allowlist-spinner" class="spinner hidden"></span>
+        Save Allowlist
+      </button>
+      <span id="allowlist-status" style="font-size:.85rem;opacity:.7;"></span>
+    </div>
+  </div>
+
+  <!-- Log Viewer -->
+  <div class="card" style="grid-column:1/-1;">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <h2>📋 Panel Logs</h2>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <label for="log-lines" style="font-size:.85rem;opacity:.7;">Lines:</label>
+        <select id="log-lines" onchange="loadLogs()"
+          style="background:var(--bg-secondary,#1e1e2e);color:inherit;border:1px solid var(--border,#333);border-radius:4px;padding:3px 6px;">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+        <button type="button" class="btn btn-outline" style="padding:4px 12px;font-size:.85rem;" onclick="loadLogs()">Refresh</button>
+        <button type="button" class="btn btn-outline" style="padding:4px 12px;font-size:.85rem;" onclick="clearLogView()">Clear</button>
+      </div>
+    </div>
+    <pre id="log-output"
+      style="background:var(--bg-secondary,#111);color:#ccc;padding:12px;border-radius:6px;
+             overflow-x:auto;overflow-y:auto;max-height:420px;font-size:.78rem;line-height:1.5;
+             white-space:pre-wrap;word-break:break-all;margin:0;">Loading logs...</pre>
   </div>
 
 </div>
@@ -122,15 +169,86 @@ async function doUpdate() {
 
   if (data.restarting) {
     document.getElementById('update-status').textContent = 'Restarting panel...';
-    showToast('Update applied — restarting in 3s', 'success');
+    showToast('Update applied — restarting in 5s', 'success');
     setTimeout(() => location.reload(), 5000);
   } else if (data.needs_rebuild) {
-    document.getElementById('update-status').textContent = '⚠️ Rebuild required';
-    showToast('Run: docker compose up -d --build', 'info');
+    document.getElementById('update-status').textContent = '⚠️ Rebuild required on host';
+    showToast('Run: docker compose up -d --build on the host', 'info');
   } else {
     document.getElementById('update-status').textContent = 'Already up to date';
     showToast('Already up to date', 'info');
   }
 }
+
+// ── IP Allowlist ─────────────────────────────────────────────────────────────
+async function loadAllowlist() {
+  const res = await apiFetch('/api/settings/ip-allowlist');
+  if (!res) return;
+  const data = await res.json();
+  document.getElementById('allowlist-input').value = (data.allowlist || []).join('\n');
+  document.getElementById('allowlist-status').textContent = data.allowlist && data.allowlist.length
+    ? data.allowlist.length + ' rule(s) active'
+    : 'All IPs allowed (no rules)';
+}
+
+async function saveAllowlist() {
+  const raw = document.getElementById('allowlist-input').value;
+  const entries = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  if (entries.length > 0) {
+    const ok = confirm(
+      'You are about to restrict panel access to ' + entries.length + ' IP(s).\n' +
+      'Make sure YOUR current IP is in the list, or you will be locked out.\n\nContinue?'
+    );
+    if (!ok) return;
+  }
+  setLoading('save-allowlist-btn', 'allowlist-spinner', true);
+  const res = await apiFetch('/api/settings/ip-allowlist', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({allowlist: entries}),
+  });
+  setLoading('save-allowlist-btn', 'allowlist-spinner', false);
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) {
+    showToast(entries.length
+      ? 'Allowlist saved (' + entries.length + ' rules)'
+      : 'Allowlist cleared — all IPs allowed', 'success');
+    document.getElementById('allowlist-status').textContent = entries.length
+      ? entries.length + ' rule(s) active'
+      : 'All IPs allowed (no rules)';
+  } else {
+    showToast(data.error || 'Error saving allowlist', 'error');
+  }
+}
+
+// ── Log viewer ───────────────────────────────────────────────────────────────
+async function loadLogs() {
+  const n = document.getElementById('log-lines').value;
+  const pre = document.getElementById('log-output');
+  pre.textContent = 'Loading...';
+  const res = await apiFetch('/api/logs?lines=' + n);
+  if (!res) { pre.textContent = 'Failed to load logs.'; return; }
+  const data = await res.json();
+  if (data.error && !data.lines.length) {
+    pre.textContent = data.error;
+    return;
+  }
+  pre.textContent = data.lines.join('\n') || '(no log entries yet)';
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function clearLogView() {
+  document.getElementById('log-output').textContent = '(cleared — logs are still on disk)';
+}
+
+// ── On load ──────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  apiFetch('/api/servers').then(r => r && r.json()).then(d => {
+    if (d) document.getElementById('total-servers').textContent = Object.keys(d.servers || {}).length;
+  }).catch(() => {});
+  loadAllowlist();
+  loadLogs();
+});
 </script>
 {% endblock %}

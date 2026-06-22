@@ -1,33 +1,39 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="{{ bcp47_lang }}" dir="{{ 'rtl' if is_rtl else 'ltr' }}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ورود — Amnezia Panel</title>
+  <title>Amnezia Panel</title>
   <link rel="stylesheet" href="/static/css/style.css" />
 </head>
 <body class="login-body">
   <div class="login-container">
     <div class="login-logo">
-      <span style="font-size:3rem">🛡️</span>
+      <span class="logo-icon">🛡️</span>
       <h1>Amnezia Panel</h1>
-      <p>پنل مدیریت VPN</p>
+      <p>VPN Management Panel</p>
+    </div>
+
+    <div class="lang-switcher login-lang-switcher">
+      {% for l in supported_langs %}
+      <a href="/api/language/{{ l }}" class="lang-btn {% if l == lang %}active{% endif %}">{{ lang_names.get(l, l.upper()) }}</a>
+      {% endfor %}
     </div>
 
     {% if error %}
-    <div class="alert alert-error">{{ error }}</div>
+    <div class="alert alert-error">{{ t.get('wrong_credentials', 'Wrong username or password') }}</div>
     {% endif %}
 
     <form class="login-form" method="POST" action="/login">
       <div class="form-group">
-        <label>نام کاربری</label>
-        <input type="text" name="username" placeholder="admin" required autofocus />
+        <label for="login-username">{{ t.get('username', 'Username') }}</label>
+        <input type="text" id="login-username" name="username" placeholder="admin" required autofocus />
       </div>
       <div class="form-group">
-        <label>رمز عبور</label>
-        <input type="password" name="password" placeholder="••••••••" required />
+        <label for="login-password">{{ t.get('password', 'Password') }}</label>
+        <input type="password" id="login-password" name="password" placeholder="••••••••" required />
       </div>
-      <button type="submit" class="btn btn-primary btn-block">ورود به پنل</button>
+      <button type="submit" class="btn btn-primary btn-block">{{ t.get('login', 'Login') }}</button>
     </form>
   </div>
 </body>

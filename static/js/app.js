@@ -1,3 +1,10 @@
+// ─── Apply traffic bar widths from data-pct ───────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.js-bar').forEach(el => {
+    el.style.setProperty('--bar-width', `${el.dataset.pct}%`);
+  });
+});
+
 // ─── Toast notifications ──────────────────────────────────────────
 function showToast(message, type = 'info', duration = 3500) {
   const container = document.getElementById('toast-container');

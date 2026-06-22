@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="{{ bcp47_lang }}" dir="{{ 'rtl' if is_rtl else 'ltr' }}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,45 +8,54 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>" />
 </head>
 <body>
-  <div class="layout">
-    <!-- Sidebar -->
-    <aside class="sidebar">
-      <div class="sidebar-logo">
-        <span class="logo-icon">🛡️</span>
-        <div>
-          <div class="logo-title">Amnezia Panel</div>
-          <div class="logo-version">v{{ version }}</div>
-        </div>
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <span class="logo-icon">🛡️</span>
+      <div>
+        <div class="logo-title">Amnezia Panel</div>
+        <div class="logo-version">v{{ version }}</div>
       </div>
+    </div>
 
-      <nav class="sidebar-nav">
-        <a href="/" class="nav-item {% if request.url.path == '/' %}active{% endif %}">
-          <span class="nav-icon">📊</span> داشبورد
-        </a>
-        <a href="/settings" class="nav-item {% if request.url.path == '/settings' %}active{% endif %}">
-          <span class="nav-icon">⚙️</span> تنظیمات
-        </a>
-      </nav>
+    <nav class="sidebar-nav">
+      <a href="/" class="nav-item {% if request.url.path == '/' %}active{% endif %}">
+        <span class="nav-icon">📊</span> {{ t.get('dashboard', 'Dashboard') }}
+      </a>
+      <a href="/settings" class="nav-item {% if request.url.path == '/settings' %}active{% endif %}">
+        <span class="nav-icon">⚙️</span> {{ t.get('settings', 'Settings') }}
+      </a>
+    </nav>
 
-      <div class="sidebar-footer">
-        <a href="/logout" class="btn-logout">خروج از حساب</a>
-      </div>
-    </aside>
+    <!-- Language switcher -->
+    <div class="lang-switcher">
+      {% for l in supported_langs %}
+      <a href="/api/language/{{ l }}" class="lang-btn {% if l == lang %}active{% endif %}">
+        {{ lang_names.get(l, l.upper()) }}
+      </a>
+      {% endfor %}
+    </div>
 
-    <!-- Main content -->
-    <main class="main-content">
-      {% block content %}{% endblock %}
-    </main>
-  </div>
+    <div class="sidebar-footer">
+      <a href="/logout" class="btn-logout">🚪 {{ t.get('logout', 'Logout') }}</a>
+    </div>
+  </aside>
 
-  <!-- Toast container -->
-  <div id="toast-container"></div>
+  <!-- Main -->
+  <main class="main-content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
 
-  <!-- Global modals -->
-  <div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()"></div>
-  <div id="modal-container"></div>
+<!-- Toast container -->
+<div id="toast-container"></div>
 
-  <script src="/static/js/app.js"></script>
-  {% block scripts %}{% endblock %}
+<!-- Modal overlay -->
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()"></div>
+
+<script src="/static/js/app.js"></script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

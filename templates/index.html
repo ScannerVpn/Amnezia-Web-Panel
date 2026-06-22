@@ -1,71 +1,80 @@
 {% extends "base.html" %}
-{% block title %}داشبورد — Amnezia Panel{% endblock %}
+{% block title %}{{ t.get('dashboard', 'Dashboard') }} — Amnezia Panel{% endblock %}
 
 {% block content %}
 <div class="page-header">
-  <h1 class="page-title">داشبورد</h1>
-  <button class="btn btn-primary" onclick="openAddServerModal()">
-    <span>+</span> افزودن سرور
+  <h1 class="page-title">{{ t.get('dashboard', 'Dashboard') }}</h1>
+  <button type="button" class="btn btn-primary" onclick="openAddServerModal()">
+    + {{ t.get('add_server', 'Add Server') }}
   </button>
+</div>
+
+<!-- Stats row -->
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-label">{{ t.get('servers', 'Servers') }}</div>
+    <div class="stat-value">{{ servers|length }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">{{ t.get('total_users', 'Total Users') }}</div>
+    <div class="stat-value">{{ total_users }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">{{ t.get('active_users', 'Active Protocols') }}</div>
+    <div class="stat-value">{{ active_protos }}</div>
+  </div>
 </div>
 
 {% if not servers %}
 <div class="empty-state">
   <div class="empty-icon">🖥️</div>
-  <h2>سروری وجود ندارد</h2>
-  <p>اولین سرور VPN خود را اضافه کنید</p>
-  <button class="btn btn-primary" onclick="openAddServerModal()">افزودن سرور</button>
+  <h2>{{ t.get('no_servers', 'No servers yet') }}</h2>
+  <p>{{ t.get('add_first_server', 'Add your first VPN server to get started') }}</p>
+  <button type="button" class="btn btn-primary" onclick="openAddServerModal()">
+    + {{ t.get('add_server', 'Add Server') }}
+  </button>
 </div>
 {% else %}
 <div class="servers-grid">
   {% for server in servers %}
   <div class="server-card" id="card-{{ server.id }}">
     <div class="server-card-header">
-      <div class="server-info">
-        <h3 class="server-name">{{ server.name }}</h3>
-        <span class="server-host">{{ server.host }}:{{ server.ssh_port }}</span>
+      <div>
+        <div class="server-name">{{ server.name }}</div>
+        <div class="server-host">{{ server.host }}:{{ server.ssh_port }}</div>
       </div>
       <div class="server-actions">
-        <button class="btn-icon" title="پینگ" onclick="pingServer('{{ server.id }}')">📡</button>
-        <button class="btn-icon" title="ری‌استارت" onclick="rebootServer('{{ server.id }}')">🔄</button>
-        <button class="btn-icon btn-danger" title="حذف" onclick="deleteServer('{{ server.id }}', '{{ server.name }}')">🗑️</button>
+        <button type="button" class="btn-icon" title="{{ t.get('ping', 'Ping') }}" onclick="pingServer('{{ server.id }}')">📡</button>
+        <button type="button" class="btn-icon" title="{{ t.get('reboot', 'Reboot') }}" onclick="rebootServer('{{ server.id }}', '{{ t.get('reboot_confirm', 'Reboot this server?') }}')">🔄</button>
+        <button type="button" class="btn-icon btn-danger" title="{{ t.get('delete', 'Delete') }}" onclick="deleteServer('{{ server.id }}', '{{ server.name }}')">🗑️</button>
       </div>
     </div>
 
     <div class="server-ping" id="ping-{{ server.id }}">
-      <span class="ping-dot"></span>
-      <span class="ping-text">در حال بررسی...</span>
+      <span class="ping-dot pulsing"></span>
+      <span class="ping-text">—</span>
     </div>
 
     <div class="protocols-grid">
-      {% for proto_key, proto_label, proto_emoji in [
-        ('awg', 'AmneziaWG', '🔒'),
-        ('wireguard', 'WireGuard', '🔑'),
-        ('xray', 'Xray Reality', '⚡'),
-        ('openvpn', 'OpenVPN', '🌐')
-      ] %}
-      {% set proto = server.protocols.get(proto_key, {}) %}
+      {% for pk in ['awg','wireguard','xray','openvpn'] %}
+      {% set proto = server.protocols.get(pk, {}) %}
       <div class="protocol-badge {% if proto.get('installed') %}installed{% endif %}">
-        <span>{{ proto_emoji }}</span>
-        <span>{{ proto_label }}</span>
-        {% if proto.get('installed') %}
-        <span class="badge-dot green"></span>
-        {% else %}
-        <span class="badge-dot gray"></span>
-        {% endif %}
+        <span>{% if pk == 'awg' %}🔒{% elif pk == 'wireguard' %}🔑{% elif pk == 'xray' %}⚡{% else %}🌐{% endif %}</span>
+        <span>{% if pk == 'awg' %}AWG{% elif pk == 'wireguard' %}WG{% elif pk == 'xray' %}Xray{% else %}OpenVPN{% endif %}</span>
+        <span class="badge-dot {% if proto.get('installed') %}green{% else %}gray{% endif %}"></span>
       </div>
       {% endfor %}
     </div>
 
     <div class="server-stats">
-      {% set total_clients = namespace(n=0) %}
-      {% for protocol_clients in server.clients.values() %}
-        {% set total_clients.n = total_clients.n + protocol_clients|length %}
-      {% endfor %}
-      <span>👥 {{ total_clients.n }} کاربر</span>
+      {% set total = namespace(n=0) %}
+      {% for pc in server.clients.values() %}{% set total.n = total.n + pc|length %}{% endfor %}
+      👥 {{ total.n }} {{ t.get('users', 'Users') }}
     </div>
 
-    <a href="/server/{{ server.id }}" class="btn btn-outline btn-block">مدیریت سرور</a>
+    <a href="/server/{{ server.id }}" class="btn btn-outline btn-block">
+      {{ t.get('manage_server', 'Manage Server') }} →
+    </a>
   </div>
   {% endfor %}
 </div>
@@ -75,55 +84,52 @@
 <div id="add-server-modal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
-      <h2>افزودن سرور جدید</h2>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <h2>{{ t.get('add_server', 'Add Server') }}</h2>
+      <button type="button" class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <form id="add-server-form" onsubmit="submitAddServer(event)">
+    <form id="add-server-form" onsubmit="submitAddServer(event)" class="modal-form">
       <div class="form-grid">
         <div class="form-group">
-          <label>نام سرور</label>
-          <input type="text" name="name" placeholder="سرور آلمان" required />
+          <label for="s-name">{{ t.get('server_name', 'Server Name') }}</label>
+          <input type="text" id="s-name" name="name" placeholder="Germany 1" required />
         </div>
         <div class="form-group">
-          <label>آدرس IP</label>
-          <input type="text" name="host" placeholder="1.2.3.4" required />
+          <label for="s-host">{{ t.get('ip_address', 'IP Address') }}</label>
+          <input type="text" id="s-host" name="host" placeholder="1.2.3.4" required />
         </div>
         <div class="form-group">
-          <label>پورت SSH</label>
-          <input type="number" name="ssh_port" value="22" min="1" max="65535" />
+          <label for="s-port">{{ t.get('ssh_port', 'SSH Port') }}</label>
+          <input type="number" id="s-port" name="ssh_port" value="22" min="1" max="65535" />
         </div>
         <div class="form-group">
-          <label>نام کاربری</label>
-          <input type="text" name="username" value="root" required />
+          <label for="s-user">{{ t.get('username', 'Username') }}</label>
+          <input type="text" id="s-user" name="username" value="root" required />
         </div>
         <div class="form-group form-full">
-          <label>رمز عبور SSH</label>
-          <input type="password" name="password" placeholder="رمز عبور یا کلید SSH" />
+          <label for="s-pw">{{ t.get('password', 'SSH Password') }}</label>
+          <input type="password" id="s-pw" name="password" placeholder="••••••••" />
         </div>
         <div class="form-group form-full">
-          <label>کلید SSH (اختیاری)</label>
-          <textarea name="ssh_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows="4"></textarea>
+          <label for="s-key">{{ t.get('ssh_key', 'SSH Private Key (optional)') }}</label>
+          <textarea id="s-key" name="ssh_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows="3"></textarea>
         </div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-ghost" onclick="closeModal()">انصراف</button>
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.get('cancel', 'Cancel') }}</button>
         <button type="submit" class="btn btn-primary" id="add-server-btn">
           <span id="add-server-spinner" class="spinner hidden"></span>
-          افزودن و اتصال
+          {{ t.get('connect_test', 'Connect & Test') }}
         </button>
       </div>
     </form>
   </div>
 </div>
-
 {% endblock %}
 
 {% block scripts %}
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-  {% for server in servers %}
-  pingServer('{{ server.id }}', true);
-  {% endfor %}
+  {% for server in servers %}pingServer('{{ server.id }}', true);{% endfor %}
 });
 
 function openAddServerModal() {
@@ -133,63 +139,55 @@ function openAddServerModal() {
 
 async function submitAddServer(e) {
   e.preventDefault();
-  const form = e.target;
-  const btn = document.getElementById('add-server-btn');
-  const spinner = document.getElementById('add-server-spinner');
-  btn.disabled = true;
-  spinner.classList.remove('hidden');
+  setLoading('add-server-btn', 'add-server-spinner', true);
+  const fd = new FormData(e.target);
+  const body = Object.fromEntries(fd);
+  body.ssh_port = parseInt(body.ssh_port) || 22;
 
-  const data = Object.fromEntries(new FormData(form));
-  data.ssh_port = parseInt(data.ssh_port) || 22;
-
-  try {
-    const res = await fetch('/api/servers', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(data),
-    });
-    const json = await res.json();
-    if (json.success) {
-      showToast('سرور با موفقیت اضافه شد', 'success');
-      setTimeout(() => location.reload(), 800);
-    } else {
-      showToast(json.error || 'خطا در اتصال', 'error');
-    }
-  } catch (err) {
-    showToast('خطای شبکه', 'error');
+  const res = await fetch('/api/servers', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  setLoading('add-server-btn', 'add-server-spinner', false);
+  if (data.success) {
+    showToast('{{ t.get("server_added", "Server added") }}', 'success');
+    setTimeout(() => location.reload(), 800);
+  } else {
+    showToast(data.error || 'Error', 'error');
   }
-  btn.disabled = false;
-  spinner.classList.add('hidden');
 }
 
 async function pingServer(id, silent = false) {
   const el = document.getElementById(`ping-${id}`);
   if (!el) return;
-  if (!silent) el.innerHTML = '<span class="ping-dot pulsing"></span><span class="ping-text">در حال پینگ...</span>';
-
-  const res = await fetch(`/api/servers/${id}/ping`, {method: 'POST'});
-  const data = await res.json();
-  if (data.success) {
-    el.innerHTML = `<span class="ping-dot green"></span><span class="ping-text">${data.latency_ms}ms</span>`;
-  } else {
-    el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text">آفلاین</span>`;
+  if (!silent) el.innerHTML = '<span class="ping-dot pulsing"></span><span class="ping-text">...</span>';
+  try {
+    const res = await fetch(`/api/servers/${id}/ping`, {method: 'POST'});
+    const data = await res.json();
+    if (data.success) {
+      el.innerHTML = `<span class="ping-dot green"></span><span class="ping-text text-green">${data.latency_ms}ms</span>`;
+    } else {
+      el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text text-red">Offline</span>`;
+    }
+  } catch {
+    el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text text-red">Error</span>`;
   }
 }
 
 async function deleteServer(id, name) {
-  if (!confirm(`آیا از حذف سرور "${name}" مطمئن هستید؟`)) return;
+  if (!confirm(`Delete server "${name}"?`)) return;
   const res = await fetch(`/api/servers/${id}`, {method: 'DELETE'});
   const data = await res.json();
   if (data.success) {
     document.getElementById(`card-${id}`).remove();
-    showToast('سرور حذف شد', 'success');
+    showToast('Server deleted', 'success');
   }
 }
 
-async function rebootServer(id) {
-  if (!confirm('سرور ری‌استارت شود؟')) return;
+async function rebootServer(id, msg) {
+  if (!confirm(msg)) return;
   await fetch(`/api/servers/${id}/reboot`, {method: 'POST'});
-  showToast('دستور ری‌استارت ارسال شد', 'success');
+  showToast('Reboot command sent', 'success');
 }
 </script>
 {% endblock %}

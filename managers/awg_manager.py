@@ -10,6 +10,28 @@ AWG_DIR = "/opt/amnezia/awg"
 AWG_CONTAINER = "amnezia-awg"
 AWG_CONF = f"{AWG_DIR}/wg0.conf"
 
+def _parse_wg_dump(output: str) -> dict:
+    """Parse 'wg/awg show all dump' output.
+    Peer lines: interface tab pubkey tab psk tab endpoint tab allowed_ips tab handshake tab rx tab tx tab keepalive
+    """
+    result = {}
+    for line in output.strip().split("\n"):
+        parts = line.split("\t")
+        if len(parts) < 8:
+            continue  # interface lines have 5 fields; skip them
+        pub_key = parts[1]
+        if not pub_key or pub_key == "(none)":
+            continue
+        try:
+            last_seen = int(parts[5]) if parts[5] and parts[5] != "0" else None
+            rx = int(parts[6]) if parts[6].isdigit() else 0
+            tx = int(parts[7]) if parts[7].isdigit() else 0
+            result[pub_key] = {"rx": rx, "tx": tx, "last_seen": last_seen}
+        except (ValueError, IndexError):
+            pass
+    return result
+
+
 AWG_DOCKERFILE = """\
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -217,28 +239,19 @@ class AWGManager:
         self._sync()
 
     def get_traffic(self) -> dict:
+        # Try docker container first, fall back to native
         out, _, code = self._docker_exec("awg show all dump")
         if code != 0:
+            out, _, code = self.ssh.run_sudo("awg show all dump 2>/dev/null || wg show all dump 2>/dev/null")
+        if code != 0 or not out.strip():
             return {}
-        result = {}
-        for line in out.strip().split("\n"):
-            parts = line.split("\t")
-            if len(parts) >= 7:
-                pub_key = parts[1]
-                rx = int(parts[5]) if parts[5].isdigit() else 0
-                tx = int(parts[6]) if parts[6].isdigit() else 0
-                last_seen = int(parts[4]) if parts[4].isdigit() and parts[4] != "0" else None
-                result[pub_key] = {"rx": rx, "tx": tx, "last_seen": last_seen}
-        return result
+        return _parse_wg_dump(out)
 
     def get_live_peers(self) -> list[str]:
-        out, _, _ = self._docker_exec("awg show all dump")
-        peers = []
-        for line in out.strip().split("\n"):
-            parts = line.split("\t")
-            if len(parts) >= 7 and not line.startswith("wg"):
-                peers.append(parts[1])
-        return peers
+        out, _, code = self._docker_exec("awg show all dump")
+        if code != 0:
+            out, _, _ = self.ssh.run_sudo("awg show all dump 2>/dev/null || wg show all dump 2>/dev/null")
+        return list(_parse_wg_dump(out).keys())
 
     def _detect_iface(self) -> str:
         out, _, _ = self._exec("ip route | grep default | awk '{print $5}' | head -1")

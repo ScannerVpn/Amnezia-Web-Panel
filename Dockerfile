@@ -17,8 +17,13 @@ COPY --chown=paneluser:paneluser . .
 
 RUN mkdir -p /app/data && chown -R paneluser:paneluser /app/data
 
+# Copy and make entrypoint executable
+COPY --chown=paneluser:paneluser docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 USER paneluser
 
 EXPOSE 54325
 
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "54325", "--workers", "1"]

@@ -91,11 +91,35 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     secret_file = DATA_DIR / ".secret_key"
     if secret_file.exists():
-        SECRET_KEY = secret_file.read_text().strip()
+        try:
+            SECRET_KEY = secret_file.read_text().strip()
+        except PermissionError:
+            logger.warning(
+                "Cannot read %s (permission denied). Regenerating. "
+                "Run on host: sudo chown -R 1000:1000 data/",
+                secret_file,
+            )
+            try:
+                os.unlink(secret_file)
+            except PermissionError:
+                logger.error(
+                    "Cannot remove %s — run: sudo chown -R 1000:1000 data/",
+                    secret_file,
+                )
+                raise
+            SECRET_KEY = secrets.token_hex(32)
+            secret_file.write_text(SECRET_KEY)
+            try:
+                os.chmod(secret_file, 0o600)
+            except OSError:
+                pass
     else:
         SECRET_KEY = secrets.token_hex(32)
         secret_file.write_text(SECRET_KEY)
-        os.chmod(secret_file, 0o600)
+        try:
+            os.chmod(secret_file, 0o600)
+        except OSError:
+            pass
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=86400 * 30)
 
 

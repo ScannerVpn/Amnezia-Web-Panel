@@ -11,26 +11,6 @@ logger = logging.getLogger(__name__)
 
 # Persistent known_hosts file (lives under DATA_DIR so it survives container restarts)
 _KNOWN_HOSTS_FILE = Path(os.getenv("DATA_DIR", "./data")) / "known_hosts"
-# Allow disabling strict host key checking via env (default: strict)
-_STRICT_HOST_KEY = os.getenv("SSH_STRICT_HOST_KEY", "1") == "1"
-
-
-def _validate_path_component(name: str, max_len: int = 64) -> str:
-    """Validate a single path component to prevent path traversal and shell injection.
-    Returns the sanitized name or raises ValueError."""
-    import re
-    if not name or not isinstance(name, str):
-        raise ValueError("Name must be a non-empty string")
-    name = name.strip()
-    if len(name) > max_len:
-        raise ValueError(f"Name too long (max {max_len} chars)")
-    # Allow letters, digits, underscore, hyphen, dot — nothing else
-    if not re.match(r"^[a-zA-Z0-9._-]+$", name):
-        raise ValueError("Name can only contain letters, digits, dots, underscores, and hyphens")
-    # Block path traversal
-    if ".." in name or "/" in name or "\\" in name:
-        raise ValueError("Name contains forbidden characters")
-    return name
 
 
 class SSHManager:
@@ -47,17 +27,12 @@ class SSHManager:
     def connect(self) -> None:
         self._client = paramiko.SSHClient()
 
-        # Strict host key policy with persistent known_hosts
-        if _STRICT_HOST_KEY:
-            _KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            if _KNOWN_HOSTS_FILE.exists():
-                self._client.load_host_keys(str(_KNOWN_HOSTS_FILE))
-            self._client.load_system_host_keys()
-            self._client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        else:
-            # Fallback for first-time setup (logged warning)
-            logger.warning("SSH_STRICT_HOST_KEY disabled — using AutoAddPolicy (insecure)")
-            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # Load known_hosts for caching, auto-add unknown hosts
+        _KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if _KNOWN_HOSTS_FILE.exists():
+            self._client.load_host_keys(str(_KNOWN_HOSTS_FILE))
+        self._client.load_system_host_keys()
+        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         kwargs = {
             "hostname": self.host,
@@ -81,8 +56,8 @@ class SSHManager:
 
         try:
             self._client.connect(**kwargs)
-            # Save host key for future strict checks
-            if _STRICT_HOST_KEY and self._client.get_transport():
+            # Save host key for future connections
+            if self._client.get_transport():
                 try:
                     self._client.save_host_keys(str(_KNOWN_HOSTS_FILE))
                 except Exception:

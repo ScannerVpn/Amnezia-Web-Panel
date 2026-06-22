@@ -1,7 +1,7 @@
 import logging
 import re
 import secrets
-from .ssh_manager import SSHManager, _validate_path_component
+from .ssh_manager import SSHManager
 
 logger = logging.getLogger(__name__)
 

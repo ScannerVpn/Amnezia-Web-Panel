@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class SSHManager:
     def __init__(self, host: str, port: int, username: str,
-                 password: str = None, key_data: str = None):
+                 password: Optional[str] = None, key_data: Optional[str] = None):
         self.host = host
         self.port = port
         self.username = username
@@ -41,7 +41,14 @@ class SSHManager:
         elif self.password:
             kwargs["password"] = self.password
 
-        self._client.connect(**kwargs)
+        try:
+            self._client.connect(**kwargs)
+        except paramiko.AuthenticationException:
+            raise ConnectionError(f"Authentication failed for {self.username}@{self.host}")
+        except paramiko.SSHException as e:
+            raise ConnectionError(f"SSH error connecting to {self.host}: {e}")
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to {self.host}: {e}")
 
     def disconnect(self) -> None:
         if self._client:
@@ -59,12 +66,18 @@ class SSHManager:
         self.disconnect()
 
     def run_command(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
-        stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
-        stdout.channel.settimeout(timeout)
-        out = stdout.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
-        err = stderr.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
-        code = stdout.channel.recv_exit_status()
-        return out, err, code
+        if not self._client:
+            raise ConnectionError("Not connected")
+        try:
+            stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+            stdout.channel.settimeout(timeout)
+            out = stdout.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+            err = stderr.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+            code = stdout.channel.recv_exit_status()
+            return out, err, code
+        except Exception as e:
+            logger.error("Command failed on %s: %s", self.host, e)
+            raise
 
     def run_sudo(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
         if self._is_root:

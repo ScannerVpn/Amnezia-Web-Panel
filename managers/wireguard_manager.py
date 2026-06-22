@@ -1,24 +1,6 @@
 import logging
 from .ssh_manager import SSHManager
-
-
-def _parse_wg_dump(output: str) -> dict:
-    result = {}
-    for line in output.strip().split("\n"):
-        parts = line.split("\t")
-        if len(parts) < 8:
-            continue
-        pub_key = parts[1]
-        if not pub_key or pub_key == "(none)":
-            continue
-        try:
-            last_seen = int(parts[5]) if parts[5] and parts[5] != "0" else None
-            rx = int(parts[6]) if parts[6].isdigit() else 0
-            tx = int(parts[7]) if parts[7].isdigit() else 0
-            result[pub_key] = {"rx": rx, "tx": tx, "last_seen": last_seen}
-        except (ValueError, IndexError):
-            pass
-    return result
+from utils import parse_wg_dump
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +124,11 @@ mkdir -p /etc/wireguard
         out, _, code = self.ssh.run_sudo("wg show all dump 2>/dev/null")
         if code != 0 or not out.strip():
             return {}
-        return _parse_wg_dump(out)
+        return parse_wg_dump(out)
 
     def get_live_peers(self) -> list[str]:
         out, _, _ = self.ssh.run_sudo("wg show all dump 2>/dev/null")
-        return list(_parse_wg_dump(out).keys())
+        return list(parse_wg_dump(out).keys())
 
     def build_client_conf(self, client: dict, server: dict) -> str:
         return (

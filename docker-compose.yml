@@ -6,10 +6,17 @@ services:
     ports:
       - "${PANEL_PORT:-54325}:54325"
     volumes:
-      - .:/app
       - ./data:/app/data
     env_file:
       - .env
     environment:
       - DATA_DIR=/app/data
       - PANEL_PORT=54325
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:54325/login')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true

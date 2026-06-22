@@ -3,33 +3,13 @@ import struct
 import logging
 from typing import Optional
 from .ssh_manager import SSHManager
+from utils import parse_wg_dump
 
 logger = logging.getLogger(__name__)
 
 AWG_DIR = "/opt/amnezia/awg"
 AWG_CONTAINER = "amnezia-awg"
 AWG_CONF = f"{AWG_DIR}/wg0.conf"
-
-def _parse_wg_dump(output: str) -> dict:
-    """Parse 'wg/awg show all dump' output.
-    Peer lines: interface tab pubkey tab psk tab endpoint tab allowed_ips tab handshake tab rx tab tx tab keepalive
-    """
-    result = {}
-    for line in output.strip().split("\n"):
-        parts = line.split("\t")
-        if len(parts) < 8:
-            continue  # interface lines have 5 fields; skip them
-        pub_key = parts[1]
-        if not pub_key or pub_key == "(none)":
-            continue
-        try:
-            last_seen = int(parts[5]) if parts[5] and parts[5] != "0" else None
-            rx = int(parts[6]) if parts[6].isdigit() else 0
-            tx = int(parts[7]) if parts[7].isdigit() else 0
-            result[pub_key] = {"rx": rx, "tx": tx, "last_seen": last_seen}
-        except (ValueError, IndexError):
-            pass
-    return result
 
 
 AWG_DOCKERFILE = """\
@@ -194,18 +174,6 @@ class AWGManager:
 
     def remove_client(self, public_key: str):
         conf = self._read_conf()
-        lines = conf.split("\n")
-        new_lines = []
-        skip = False
-        for line in lines:
-            if line.strip() == "[Peer]":
-                skip = False
-                block = []
-                new_lines.append(("[PEER_START]", block))
-                continue
-            if "[PEER_START]" in str(new_lines[-1] if new_lines else ""):
-                pass
-        # simpler approach: rebuild without the matching peer
         new_conf = self._remove_peer_from_conf(conf, public_key)
         self._write_conf(new_conf)
         self._sync()
@@ -245,13 +213,13 @@ class AWGManager:
             out, _, code = self.ssh.run_sudo("awg show all dump 2>/dev/null || wg show all dump 2>/dev/null")
         if code != 0 or not out.strip():
             return {}
-        return _parse_wg_dump(out)
+        return parse_wg_dump(out)
 
     def get_live_peers(self) -> list[str]:
         out, _, code = self._docker_exec("awg show all dump")
         if code != 0:
             out, _, _ = self.ssh.run_sudo("awg show all dump 2>/dev/null || wg show all dump 2>/dev/null")
-        return list(_parse_wg_dump(out).keys())
+        return list(parse_wg_dump(out).keys())
 
     def _detect_iface(self) -> str:
         out, _, _ = self._exec("ip route | grep default | awk '{print $5}' | head -1")

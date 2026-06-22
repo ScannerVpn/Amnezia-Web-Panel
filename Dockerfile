@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+RUN useradd -m -u 1000 paneluser
+COPY --chown=paneluser:paneluser . .
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data && chown -R paneluser:paneluser /app/data
+
+USER paneluser
 
 EXPOSE 54325
 

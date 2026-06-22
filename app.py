@@ -8,7 +8,10 @@ import os
 import secrets
 import signal
 import subprocess
+import time
 import uuid
+from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -21,6 +24,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from starlette.middleware.sessions import SessionMiddleware
 
 from managers.ssh_manager import SSHManager
@@ -28,6 +32,13 @@ from managers.awg_manager import AWGManager
 from managers.wireguard_manager import WireGuardManager
 from managers.xray_manager import XrayManager, PROTO_TO_ITYPE
 from managers.openvpn_manager import OpenVPNManager
+from models import (
+    AddServerRequest, InstallProtocolRequest, AddClientRequest,
+    BulkCreateRequest, UpdateClientRequest, ImportExternalRequest,
+    ChangePasswordRequest,
+)
+from utils import parse_wg_dump
+import crypto
 
 load_dotenv()
 
@@ -41,12 +52,30 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_LOCK = asyncio.Lock()
 INSTALL_TASKS: dict[str, dict] = {}
+LOGIN_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_WINDOW = 300  # 5 minutes
 
-app = FastAPI(title="Amnezia Web Panel", version=VERSION)
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    asyncio.create_task(_auto_sync())
+    yield
+
+
+app = FastAPI(title="Amnezia Web Panel", version=VERSION, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_hex(32))
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    secret_file = DATA_DIR / ".secret_key"
+    if secret_file.exists():
+        SECRET_KEY = secret_file.read_text().strip()
+    else:
+        SECRET_KEY = secrets.token_hex(32)
+        secret_file.write_text(SECRET_KEY)
+        os.chmod(secret_file, 0o600)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=86400 * 30)
 
 ALL_PROTOCOLS = ["awg", "wireguard", "xray", "xray_ws", "xray_grpc", "xray_vmess", "xray_trojan", "xray_ss", "openvpn"]
@@ -89,13 +118,26 @@ async def load_data() -> dict:
         data = _default_data()
         await save_data(data)
         return data
-    async with DATA_LOCK:
-        return json.loads(DATA_FILE.read_text())
+    try:
+        async with DATA_LOCK:
+            return json.loads(DATA_FILE.read_text())
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse data.json: %s", e)
+        data = _default_data()
+        await save_data(data)
+        return data
+    except Exception as e:
+        logger.exception("Failed to load data")
+        raise
 
 
 async def save_data(data: dict):
     async with DATA_LOCK:
-        DATA_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        try:
+            DATA_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        except Exception as e:
+            logger.exception("Failed to save data")
+            raise
 
 
 def now_iso() -> str:
@@ -111,11 +153,23 @@ def bytes_to_human(n: int) -> str:
 
 
 def _make_ssh(server: dict) -> SSHManager:
+    password = None
+    pw_raw = server.get("password_b64", "")
+    if pw_raw:
+        try:
+            password = crypto.decrypt(pw_raw)
+        except Exception:
+            # Fallback: try base64 decode for legacy data
+            import base64 as _b64
+            try:
+                password = _b64.b64decode(pw_raw).decode()
+            except Exception:
+                password = ""
     return SSHManager(
         host=server["host"],
         port=server.get("ssh_port", 22),
         username=server["username"],
-        password=base64.b64decode(server.get("password_b64", "")).decode() if server.get("password_b64") else None,
+        password=password,
         key_data=server.get("ssh_key"),
     )
 
@@ -159,6 +213,7 @@ def render(request: Request, tpl: str, **ctx):
     return templates.TemplateResponse(tpl, {
         "request": request, "version": VERSION,
         "bytes_to_human": bytes_to_human,
+        "now_iso": now_iso,
         "t": t, "lang": lang, "is_rtl": is_rtl,
         "bcp47_lang": _BCP47.get(lang, "en"),
         "supported_langs": SUPPORTED_LANGS,
@@ -168,26 +223,6 @@ def render(request: Request, tpl: str, **ctx):
 
 
 # ── WG dump helpers ───────────────────────────────────────────────────────────
-
-def _parse_wg_dump(output: str) -> dict:
-    """Parse wg show all dump → {pubkey: {rx, tx, last_seen}}"""
-    result = {}
-    for line in output.strip().split("\n"):
-        parts = line.split("\t")
-        if len(parts) < 8:
-            continue
-        pub_key = parts[1]
-        if not pub_key or pub_key == "(none)":
-            continue
-        try:
-            last_seen = int(parts[5]) if parts[5] and parts[5] != "0" else None
-            rx = int(parts[6]) if parts[6].isdigit() else 0
-            tx = int(parts[7]) if parts[7].isdigit() else 0
-            result[pub_key] = {"rx": rx, "tx": tx, "last_seen": last_seen}
-        except (ValueError, IndexError):
-            pass
-    return result
-
 
 def _parse_wg_conf_peers(conf: str) -> list[str]:
     return [l.split("=", 1)[1].strip() for l in conf.split("\n")
@@ -215,13 +250,25 @@ async def login_page(request: Request):
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    
+    # Rate limiting: clean old attempts and check limit
+    LOGIN_ATTEMPTS[client_ip] = [t for t in LOGIN_ATTEMPTS[client_ip] if now - t < LOGIN_WINDOW]
+    if len(LOGIN_ATTEMPTS[client_ip]) >= MAX_LOGIN_ATTEMPTS:
+        return render(request, "login.html", error=True, 
+                      message="Too many login attempts. Please try again later.")
+    
     data = await load_data()
     panel = data["panel"]
     if username == panel["admin_username"] and bcrypt.checkpw(
         password.encode(), panel["admin_password_hash"].encode()
     ):
+        LOGIN_ATTEMPTS.pop(client_ip, None)
         request.session["authenticated"] = True
         return RedirectResponse("/", status_code=302)
+    
+    LOGIN_ATTEMPTS[client_ip].append(now)
     return render(request, "login.html", error=True)
 
 
@@ -272,14 +319,17 @@ async def server_detail(request: Request, server_id: str):
 @app.post("/api/servers")
 async def add_server(request: Request):
     require_auth(request)
-    body = await request.json()
+    try:
+        body = AddServerRequest(**await request.json())
+    except ValidationError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=422)
     sid = str(uuid.uuid4())
-    pw_b64 = base64.b64encode(body.get("password", "").encode()).decode() if body.get("password") else ""
+    pw_encrypted = crypto.encrypt(body.password) if body.password else ""
     server = {
-        "id": sid, "name": body.get("name", body["host"]),
-        "host": body["host"], "ssh_port": int(body.get("ssh_port", 22)),
-        "username": body.get("username", "root"),
-        "password_b64": pw_b64, "ssh_key": body.get("ssh_key", ""),
+        "id": sid, "name": body.name or body.host,
+        "host": body.host, "ssh_port": body.ssh_port,
+        "username": body.username,
+        "password_b64": pw_encrypted, "ssh_key": body.ssh_key,
         "created_at": now_iso(),
         "protocols": {p: {"installed": False} for p in ALL_PROTOCOLS},
         "clients":   {p: {} for p in ALL_PROTOCOLS},
@@ -444,10 +494,13 @@ async def uninstall_protocol(request: Request, server_id: str, protocol: str):
 
 def _next_ip(proto_conf: dict, clients: dict) -> str:
     subnet = proto_conf.get("subnet", "10.8.1.0/24")
-    base = subnet.rsplit(".", 1)[0]
+    parts = subnet.split("/")
+    base_parts = parts[0].rsplit(".", 1)[0]
+    cidr = int(parts[1]) if len(parts) > 1 else 24
+    max_hosts = 2 ** (32 - cidr) - 2
     used = {c["ip"] for c in clients.values() if c.get("ip")}
-    for i in range(2, 254):
-        ip = f"{base}.{i}"
+    for i in range(2, min(max_hosts + 2, 254)):
+        ip = f"{base_parts}.{i}"
         if ip not in used:
             return ip
     raise ValueError("IP pool exhausted")
@@ -481,8 +534,11 @@ def _compute_expires_at(body: dict) -> str | None:
 @app.post("/api/servers/{server_id}/protocols/{protocol}/clients")
 async def add_client(request: Request, server_id: str, protocol: str):
     require_auth(request)
-    body = await request.json()
-    client_name = body.get("name", f"user_{secrets.token_hex(3)}")
+    try:
+        body = AddClientRequest(**await request.json())
+    except ValidationError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=422)
+    client_name = body.name or f"user_{secrets.token_hex(3)}"
 
     data = await load_data()
     server = data["servers"].get(server_id)
@@ -496,31 +552,31 @@ async def add_client(request: Request, server_id: str, protocol: str):
     proto_conf = server["protocols"][protocol]
     clients = server["clients"].setdefault(protocol, {})
     cid = str(uuid.uuid4())
-    expires_at = _compute_expires_at(body)
+    expires_at = _compute_expires_at(body.dict())
 
     try:
         with _make_ssh(server) as ssh:
             if protocol == "awg":
-                ip = body.get("ip") or _next_ip(proto_conf, clients)
+                ip = body.ip or _next_ip(proto_conf, clients)
                 keys = AWGManager(ssh).add_client(proto_conf, client_name, ip)
-                clients[cid] = _wg_client(cid, client_name, ip, keys, body, expires_at)
+                clients[cid] = _wg_client(cid, client_name, ip, keys, body.dict(), expires_at)
 
             elif protocol == "wireguard":
-                ip = body.get("ip") or _next_ip(proto_conf, clients)
+                ip = body.ip or _next_ip(proto_conf, clients)
                 keys = WireGuardManager(ssh).add_client(proto_conf["server_public_key"], ip, client_name)
-                clients[cid] = _wg_client(cid, client_name, ip, keys, body, expires_at)
+                clients[cid] = _wg_client(cid, client_name, ip, keys, body.dict(), expires_at)
 
             elif protocol in XRAY_PROTOCOLS:
                 itype = PROTO_TO_ITYPE[protocol]
                 info = XrayManager(ssh).add_client(proto_conf["id"], itype, client_name)
                 clients[cid] = {
                     "id": cid, "name": client_name,
-                    "email": body.get("email", ""), "notes": body.get("notes", ""),
+                    "email": body.email, "notes": body.notes,
                     "xray_id": info.get("id", ""), "password": info.get("password", ""),
                     "inbound_id": proto_conf["id"], "inbound_type": itype,
                     "enabled": True, "source": "panel", "created_at": now_iso(),
                     "expires_at": expires_at,
-                    "traffic_limit_bytes": int(body.get("traffic_limit_gb", 0)) * 1024 ** 3,
+                    "traffic_limit_bytes": body.traffic_limit_gb * 1024 ** 3,
                     "traffic_rx": 0, "traffic_tx": 0, "last_seen": None,
                 }
 
@@ -528,11 +584,11 @@ async def add_client(request: Request, server_id: str, protocol: str):
                 info = OpenVPNManager(ssh).add_client(client_name)
                 clients[cid] = {
                     "id": cid, "name": client_name,
-                    "email": body.get("email", ""), "notes": body.get("notes", ""),
+                    "email": body.email, "notes": body.notes,
                     "safe_name": client_name.replace(" ", "_"),
                     "enabled": True, "source": "panel", "created_at": now_iso(),
                     "expires_at": expires_at,
-                    "traffic_limit_bytes": int(body.get("traffic_limit_gb", 0)) * 1024 ** 3,
+                    "traffic_limit_bytes": body.traffic_limit_gb * 1024 ** 3,
                     "traffic_rx": 0, "traffic_tx": 0, "last_seen": None,
                     "ovpn_config": info.get("config", ""),
                 }
@@ -789,6 +845,48 @@ async def export_clients(request: Request, server_id: str, protocol: str):
 
 # ── Traffic sync ──────────────────────────────────────────────────────────────
 
+def _collect_traffic_from_server(ssh: 'SSHManager') -> dict:
+    """Collect WireGuard/AmneziaWG traffic from native and Docker sources."""
+    all_traffic: dict = {}
+
+    # 1. Native wg/awg
+    out, _, code = ssh.run_sudo("wg show all dump 2>/dev/null")
+    if code == 0 and out.strip():
+        all_traffic.update(parse_wg_dump(out))
+
+    # 2. Docker containers
+    out2, _, _ = ssh.run_sudo("docker ps --format '{{.Names}}' 2>/dev/null")
+    for cname in out2.strip().split("\n"):
+        cname = cname.strip()
+        if not cname:
+            continue
+        if any(k in cname.lower() for k in ["awg", "wireguard", "amnezia", "wg"]):
+            for cmd in ["awg show all dump", "wg show all dump"]:
+                out3, _, rc = ssh.run_sudo(f"docker exec {cname} {cmd} 2>/dev/null")
+                if rc == 0 and out3.strip():
+                    all_traffic.update(parse_wg_dump(out3))
+                    break
+
+    return all_traffic
+
+
+def _apply_traffic_to_clients(server: dict, all_traffic: dict) -> bool:
+    """Apply traffic data to WG/AWG clients. Returns True if any changes."""
+    changed = False
+    for proto in ["awg", "wireguard"]:
+        for client in server["clients"].get(proto, {}).values():
+            t = all_traffic.get(client.get("public_key", ""))
+            if t:
+                client["traffic_rx"] = t["rx"]
+                client["traffic_tx"] = t["tx"]
+                if t["last_seen"]:
+                    client["last_seen"] = datetime.fromtimestamp(
+                        t["last_seen"], tz=timezone.utc
+                    ).isoformat()
+                changed = True
+    return changed
+
+
 @app.post("/api/servers/{server_id}/sync-traffic")
 async def sync_traffic(request: Request, server_id: str):
     require_auth(request)
@@ -799,39 +897,8 @@ async def sync_traffic(request: Request, server_id: str):
 
     try:
         with _make_ssh(server) as ssh:
-            # Collect traffic from ALL possible sources (native + Docker)
-            all_traffic: dict = {}
-
-            # 1. Native wg/awg
-            out, _, code = ssh.run_sudo("wg show all dump 2>/dev/null")
-            if code == 0 and out.strip():
-                all_traffic.update(_parse_wg_dump(out))
-
-            # 2. Docker containers
-            out2, _, _ = ssh.run_sudo("docker ps --format '{{.Names}}' 2>/dev/null")
-            for cname in out2.strip().split("\n"):
-                cname = cname.strip()
-                if not cname:
-                    continue
-                if any(k in cname.lower() for k in ["awg", "wireguard", "amnezia", "wg"]):
-                    for cmd in ["awg show all dump", "wg show all dump"]:
-                        out3, _, rc = ssh.run_sudo(f"docker exec {cname} {cmd} 2>/dev/null")
-                        if rc == 0 and out3.strip():
-                            all_traffic.update(_parse_wg_dump(out3))
-                            break
-
-            # Apply traffic to all WG-type clients
-            for proto in ["awg", "wireguard"]:
-                for client in server["clients"].get(proto, {}).values():
-                    t = all_traffic.get(client.get("public_key", ""))
-                    if t:
-                        client["traffic_rx"] = t["rx"]
-                        client["traffic_tx"] = t["tx"]
-                        if t["last_seen"]:
-                            client["last_seen"] = datetime.fromtimestamp(
-                                t["last_seen"], tz=timezone.utc
-                            ).isoformat()
-
+            all_traffic = _collect_traffic_from_server(ssh)
+            _apply_traffic_to_clients(server, all_traffic)
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)})
 
@@ -862,7 +929,7 @@ async def detect_external(request: Request, server_id: str):
             # Native wg
             out, _, code = ssh.run_sudo("wg show all dump 2>/dev/null")
             if code == 0:
-                new = [p for p in _parse_wg_dump(out) if p not in known_keys]
+                new = [p for p in parse_wg_dump(out) if p not in known_keys]
                 if new:
                     detected["wireguard"] = new
 
@@ -884,7 +951,7 @@ async def detect_external(request: Request, server_id: str):
                 for cmd in ["awg show all dump", "wg show all dump"]:
                     out3, _, rc = ssh.run_sudo(f"docker exec {cname} {cmd} 2>/dev/null")
                     if rc == 0 and out3.strip():
-                        new = [p for p in _parse_wg_dump(out3) if p not in known_keys]
+                        new = [p for p in parse_wg_dump(out3) if p not in known_keys]
                         if new:
                             detected.setdefault("awg", []).extend(new)
                         break
@@ -935,15 +1002,15 @@ async def settings_page(request: Request):
 @app.post("/api/settings/password")
 async def change_password(request: Request):
     require_auth(request)
-    body = await request.json()
+    try:
+        body = ChangePasswordRequest(**await request.json())
+    except ValidationError as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=422)
     data = await load_data()
-    if not bcrypt.checkpw(body.get("current_password", "").encode(),
+    if not bcrypt.checkpw(body.current_password.encode(),
                           data["panel"]["admin_password_hash"].encode()):
         return JSONResponse({"success": False, "error": "Current password is incorrect"})
-    new_pw = body.get("new_password", "")
-    if len(new_pw) < 8:
-        return JSONResponse({"success": False, "error": "Password must be at least 8 characters"})
-    data["panel"]["admin_password_hash"] = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+    data["panel"]["admin_password_hash"] = bcrypt.hashpw(body.new_password.encode(), bcrypt.gensalt()).decode()
     await save_data(data)
     return JSONResponse({"success": True})
 
@@ -1005,33 +1072,9 @@ async def _auto_sync():
                 ssh = _make_ssh(server)
                 try:
                     with ssh:
-                        all_traffic: dict = {}
-                        out, _, code = ssh.run_sudo("wg show all dump 2>/dev/null")
-                        if code == 0 and out.strip():
-                            all_traffic.update(_parse_wg_dump(out))
-                        out2, _, _ = ssh.run_sudo("docker ps --format '{{.Names}}' 2>/dev/null")
-                        for cname in out2.strip().split("\n"):
-                            cname = cname.strip()
-                            if not cname:
-                                continue
-                            if any(k in cname.lower() for k in ["awg", "wg", "amnezia"]):
-                                for cmd in ["awg show all dump", "wg show all dump"]:
-                                    out3, _, rc = ssh.run_sudo(f"docker exec {cname} {cmd} 2>/dev/null")
-                                    if rc == 0 and out3.strip():
-                                        all_traffic.update(_parse_wg_dump(out3))
-                                        break
-
-                        for proto in ["awg", "wireguard"]:
-                            for client in server["clients"].get(proto, {}).values():
-                                t = all_traffic.get(client.get("public_key", ""))
-                                if t:
-                                    client["traffic_rx"] = t["rx"]
-                                    client["traffic_tx"] = t["tx"]
-                                    if t["last_seen"]:
-                                        client["last_seen"] = datetime.fromtimestamp(
-                                            t["last_seen"], tz=timezone.utc
-                                        ).isoformat()
-                                    changed = True
+                        all_traffic = _collect_traffic_from_server(ssh)
+                        if _apply_traffic_to_clients(server, all_traffic):
+                            changed = True
 
                         # Expiry enforcement
                         for proto in ALL_PROTOCOLS:
@@ -1054,11 +1097,6 @@ async def _auto_sync():
                 await save_data(data)
         except Exception:
             pass
-
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(_auto_sync())
 
 
 if __name__ == "__main__":

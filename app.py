@@ -286,6 +286,25 @@ for _lang in SUPPORTED_LANGS:
     TRANSLATIONS[_lang] = json.loads(_p.read_text(encoding="utf-8")) if _p.exists() else {}
 
 
+def _format_validation_error(e: ValidationError) -> list:
+    """Convert Pydantic ValidationError into JSON-serializable list.
+    Pydantic v2 errors() returns dicts where 'ctx' may contain non-serializable
+    objects (ValueError, etc.). We stringify those safely."""
+    out = []
+    for err in e.errors():
+        item = {
+            "loc": list(err.get("loc", [])),
+            "msg": str(err.get("msg", "")),
+            "type": str(err.get("type", "")),
+        }
+        if "ctx" in err and err["ctx"]:
+            item["ctx"] = {k: str(v) for k, v in err["ctx"].items()}
+        if "url" in err:
+            item["url"] = err["url"]
+        out.append(item)
+    return out
+
+
 def get_t(request: Request) -> dict:
     lang = request.session.get("lang", "en")
     return TRANSLATIONS.get(lang, TRANSLATIONS.get("en", {}))
@@ -590,7 +609,7 @@ async def add_server(request: Request):
     try:
         body = AddServerRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
     sid = str(uuid.uuid4())
     pw_encrypted = crypto.encrypt(body.password) if body.password else ""
     server = {
@@ -617,7 +636,7 @@ async def update_server(request: Request, server_id: str):
     try:
         body = UpdateServerRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
     data = await load_data()
     server = data["servers"].get(server_id)
     if not server:
@@ -751,7 +770,7 @@ async def install_protocol(request: Request, server_id: str, protocol: str):
     try:
         body = InstallProtocolRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
 
     task_id = str(uuid.uuid4())
     INSTALL_TASKS[task_id] = {
@@ -877,7 +896,7 @@ async def add_client(request: Request, server_id: str, protocol: str):
     try:
         body = AddClientRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
     client_name = body.name or f"user_{secrets.token_hex(3)}"
 
     data = await load_data()
@@ -931,7 +950,7 @@ async def bulk_create_clients(request: Request, server_id: str, protocol: str):
     try:
         body = BulkCreateRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
 
     data = await load_data()
     server = data["servers"].get(server_id)
@@ -1047,7 +1066,7 @@ async def update_client(request: Request, server_id: str, protocol: str, client_
     try:
         body = UpdateClientRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
     data = await load_data()
     server = data["servers"].get(server_id)
     if not server:
@@ -1105,7 +1124,7 @@ async def clone_client(request: Request, server_id: str, protocol: str, client_i
     try:
         body = AddClientRequest(**(await request.json()))
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
 
     data = await load_data()
     server = data["servers"].get(server_id)
@@ -1509,7 +1528,7 @@ async def import_external(request: Request, server_id: str, protocol: str, publi
     try:
         body = ImportExternalRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
     data = await load_data()
     server = data["servers"].get(server_id)
     if not server:
@@ -1548,7 +1567,7 @@ async def change_password(request: Request):
     try:
         body = ChangePasswordRequest(**await request.json())
     except ValidationError as e:
-        return JSONResponse({"success": False, "error": e.errors()}, status_code=422)
+        return JSONResponse({"success": False, "error": _format_validation_error(e)}, status_code=422)
     data = await load_data()
     if not bcrypt.checkpw(body.current_password.encode(),
                           data["panel"]["admin_password_hash"].encode()):

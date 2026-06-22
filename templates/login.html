@@ -1,39 +1,42 @@
 <!DOCTYPE html>
-<html lang="{{ bcp47_lang }}" dir="{{ 'rtl' if is_rtl else 'ltr' }}">
+<html lang="{{ bcp47_lang|default('en') }}" dir="{{ is_rtl|default(false) ? 'rtl' : 'ltr' }}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Amnezia Panel</title>
+  <title>Amnezia Panel — Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>" />
 </head>
 <body class="login-body">
   <div class="login-container">
     <div class="login-logo">
-      <span class="logo-icon">🛡️</span>
+      <div style="display:inline-grid;place-items:center;width:72px;height:72px;border-radius:18px;background:linear-gradient(135deg,#00d1ff 0%,#4d9fff 100%);font-size:36px;box-shadow:0 8px 32px rgba(0,209,255,0.35)">🛡️</div>
       <h1>Amnezia Panel</h1>
-      <p>VPN Management Panel</p>
-    </div>
-
-    <div class="lang-switcher login-lang-switcher">
-      {% for l in supported_langs %}
-      <a href="/api/language/{{ l }}" class="lang-btn {% if l == lang %}active{% endif %}">{{ lang_names.get(l, l.upper()) }}</a>
-      {% endfor %}
+      <p>{{ t.login_subtitle|default('VPN Management Console') }}</p>
     </div>
 
     {% if error %}
-    <div class="alert alert-error">{{ t.get('wrong_credentials', 'Wrong username or password') }}</div>
+    <div class="alert alert-error">
+      {% if error is string %}{{ error }}{% else %}{{ t.wrong_credentials|default('Wrong username or password') }}{% endif %}
+    </div>
     {% endif %}
 
     <form class="login-form" method="POST" action="/login">
       <div class="form-group">
-        <label for="login-username">{{ t.get('username', 'Username') }}</label>
-        <input type="text" id="login-username" name="username" placeholder="admin" required autofocus />
+        <label>{{ t.username|default('Username') }}</label>
+        <input type="text" name="username" placeholder="admin" required autofocus autocomplete="username" />
       </div>
       <div class="form-group">
-        <label for="login-password">{{ t.get('password', 'Password') }}</label>
-        <input type="password" id="login-password" name="password" placeholder="••••••••" required />
+        <label>{{ t.password|default('Password') }}</label>
+        <input type="password" name="password" placeholder="••••••••" required autocomplete="current-password" />
       </div>
-      <button type="submit" class="btn btn-primary btn-block">{{ t.get('login', 'Login') }}</button>
+      <button type="submit" class="btn btn-primary btn-block">
+        <span>{{ t.login|default('Login') }}</span>
+        <span>→</span>
+      </button>
     </form>
   </div>
 </body>

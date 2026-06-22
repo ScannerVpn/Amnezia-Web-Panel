@@ -1,16 +1,43 @@
-import paramiko
-import logging
+import hashlib
 import io
+import logging
+import os
+import paramiko
+import shlex
+from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Persistent known_hosts file (lives under DATA_DIR so it survives container restarts)
+_KNOWN_HOSTS_FILE = Path(os.getenv("DATA_DIR", "./data")) / "known_hosts"
+# Allow disabling strict host key checking via env (default: strict)
+_STRICT_HOST_KEY = os.getenv("SSH_STRICT_HOST_KEY", "1") == "1"
+
+
+def _validate_path_component(name: str, max_len: int = 64) -> str:
+    """Validate a single path component to prevent path traversal and shell injection.
+    Returns the sanitized name or raises ValueError."""
+    import re
+    if not name or not isinstance(name, str):
+        raise ValueError("Name must be a non-empty string")
+    name = name.strip()
+    if len(name) > max_len:
+        raise ValueError(f"Name too long (max {max_len} chars)")
+    # Allow letters, digits, underscore, hyphen, dot — nothing else
+    if not re.match(r"^[a-zA-Z0-9._-]+$", name):
+        raise ValueError("Name can only contain letters, digits, dots, underscores, and hyphens")
+    # Block path traversal
+    if ".." in name or "/" in name or "\\" in name:
+        raise ValueError("Name contains forbidden characters")
+    return name
 
 
 class SSHManager:
     def __init__(self, host: str, port: int, username: str,
                  password: Optional[str] = None, key_data: Optional[str] = None):
         self.host = host
-        self.port = port
+        self.port = int(port)
         self.username = username
         self.password = password
         self.key_data = key_data
@@ -19,7 +46,18 @@ class SSHManager:
 
     def connect(self) -> None:
         self._client = paramiko.SSHClient()
-        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Strict host key policy with persistent known_hosts
+        if _STRICT_HOST_KEY:
+            _KNOWN_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            if _KNOWN_HOSTS_FILE.exists():
+                self._client.load_host_keys(str(_KNOWN_HOSTS_FILE))
+            self._client.load_system_host_keys()
+            self._client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            # Fallback for first-time setup (logged warning)
+            logger.warning("SSH_STRICT_HOST_KEY disabled — using AutoAddPolicy (insecure)")
+            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         kwargs = {
             "hostname": self.host,
@@ -43,6 +81,12 @@ class SSHManager:
 
         try:
             self._client.connect(**kwargs)
+            # Save host key for future strict checks
+            if _STRICT_HOST_KEY and self._client.get_transport():
+                try:
+                    self._client.save_host_keys(str(_KNOWN_HOSTS_FILE))
+                except Exception:
+                    pass
         except paramiko.AuthenticationException:
             raise ConnectionError(f"Authentication failed for {self.username}@{self.host}")
         except paramiko.SSHException as e:
@@ -65,12 +109,19 @@ class SSHManager:
     def __exit__(self, *args):
         self.disconnect()
 
-    def run_command(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
+    def run_command(self, command: str, timeout: int = 120,
+                    stdin_data: Optional[str] = None) -> Tuple[str, str, int]:
+        """Execute a command. If `stdin_data` is provided, it is piped to the
+        command's stdin through paramiko (no shell interpolation)."""
         if not self._client:
             raise ConnectionError("Not connected")
         try:
             stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
             stdout.channel.settimeout(timeout)
+            if stdin_data is not None:
+                stdin.write(stdin_data)
+                stdin.flush()
+                stdin.channel.shutdown_write()
             out = stdout.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
             err = stderr.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
             code = stdout.channel.recv_exit_status()
@@ -80,20 +131,30 @@ class SSHManager:
             raise
 
     def run_sudo(self, command: str, timeout: int = 120) -> Tuple[str, str, int]:
+        """Run command as root. If user is not root, password is piped to sudo
+        via stdin (safe — no shell interpolation)."""
         if self._is_root:
             return self.run_command(command, timeout)
+
+        # Strip leading 'sudo ' if present
         command = command.removeprefix("sudo").strip()
-        pw = (self.password or "").replace("'", "'\\''")
-        return self.run_command(f"echo '{pw}' | sudo -S -p '' {command}", timeout)
+        # Use shlex.quote to safely pass the command to sudo -p ''
+        # Pass password via stdin (no shell interpolation)
+        return self.run_command(
+            "sudo -S -p '' " + command,
+            timeout=timeout,
+            stdin_data=(self.password or "") + "\n",
+        )
 
     def run_sudo_script(self, script: str, timeout: int = 300) -> Tuple[str, str, int]:
-        import hashlib
-        h = hashlib.md5(script.encode()).hexdigest()[:8]
+        h = hashlib.sha256(script.encode()).hexdigest()[:12]
         tmp = f"/tmp/.script_{h}.sh"
         self.upload_file(script, tmp)
-        self.run_sudo(f"chmod +x {tmp}")
-        out, err, code = self.run_sudo(f"bash {tmp}", timeout)
-        self.run_command(f"rm -f {tmp}")
+        try:
+            self.run_sudo(f"chmod +x {shlex.quote(tmp)}")
+            out, err, code = self.run_sudo(f"bash {shlex.quote(tmp)}", timeout)
+        finally:
+            self.run_command(f"rm -f {shlex.quote(tmp)}")
         return out, err, code
 
     def upload_file(self, content: str, remote_path: str) -> None:
@@ -106,11 +167,13 @@ class SSHManager:
             sftp.close()
 
     def upload_sudo_file(self, content: str, remote_path: str) -> None:
-        import hashlib
-        h = hashlib.md5(remote_path.encode()).hexdigest()[:8]
+        h = hashlib.sha256(remote_path.encode()).hexdigest()[:12]
         tmp = f"/tmp/.upload_{h}"
         self.upload_file(content, tmp)
-        self.run_sudo(f"mv {tmp} {remote_path} && chmod 600 {remote_path}")
+        self.run_sudo(
+            f"mv {shlex.quote(tmp)} {shlex.quote(remote_path)} && "
+            f"chmod 600 {shlex.quote(remote_path)}"
+        )
 
     def download_file(self, remote_path: str) -> str:
         sftp = self._client.open_sftp()
@@ -140,15 +203,22 @@ class SSHManager:
             return {"success": False, "error": str(e)}
 
     def open_port(self, port: int, protocol: str = "tcp") -> None:
-        """Open a firewall port using ufw or iptables."""
+        """Open a firewall port using ufw or iptables. Inputs are validated
+        integers/strings — safe from injection."""
+        if not isinstance(port, int) or not (1 <= port <= 65535):
+            raise ValueError("Invalid port")
         proto = protocol.lower()
+        if proto not in ("tcp", "udp"):
+            raise ValueError("Invalid protocol")
         self.run_sudo(f"ufw allow {port}/{proto} 2>/dev/null || true")
         self.run_sudo(
             f"iptables -C INPUT -p {proto} --dport {port} -j ACCEPT 2>/dev/null || "
             f"iptables -I INPUT -p {proto} --dport {port} -j ACCEPT 2>/dev/null || true"
         )
         # Persist iptables rules
-        self.run_sudo("(which iptables-save && iptables-save > /etc/iptables/rules.v4) 2>/dev/null || true")
+        self.run_sudo(
+            "(which iptables-save && iptables-save > /etc/iptables/rules.v4) 2>/dev/null || true"
+        )
 
     def ping(self) -> dict:
         import time

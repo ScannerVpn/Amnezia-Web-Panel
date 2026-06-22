@@ -1,61 +1,67 @@
 <!DOCTYPE html>
-<html lang="{{ bcp47_lang }}" dir="{{ 'rtl' if is_rtl else 'ltr' }}">
+<html lang="{{ bcp47_lang }}" dir="{{ is_rtl|default(false) ? 'rtl' : 'ltr' }}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}Amnezia Panel{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/css/style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>" />
+  <meta name="csrf-token" content="{{ csrf_token }}" />
 </head>
 <body>
-<div class="layout">
-
-  <!-- Sidebar -->
-  <aside class="sidebar">
-    <div class="sidebar-logo">
-      <span class="logo-icon">🛡️</span>
-      <div>
-        <div class="logo-title">Amnezia Panel</div>
-        <div class="logo-version">v{{ version }}</div>
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <span class="logo-icon">🛡️</span>
+        <div>
+          <div class="logo-title">Amnezia Panel</div>
+          <div class="logo-version">v{{ version }}</div>
+        </div>
       </div>
-    </div>
 
-    <nav class="sidebar-nav">
-      <a href="/" class="nav-item {% if request.url.path == '/' %}active{% endif %}">
-        <span class="nav-icon">📊</span> {{ t.get('dashboard', 'Dashboard') }}
-      </a>
-      <a href="/settings" class="nav-item {% if request.url.path == '/settings' %}active{% endif %}">
-        <span class="nav-icon">⚙️</span> {{ t.get('settings', 'Settings') }}
-      </a>
-    </nav>
+      <nav class="sidebar-nav">
+        <a href="/" class="nav-item {% if request.url.path == '/' %}active{% endif %}">
+          <span class="nav-icon">📊</span> {{ t.dashboards|default('Dashboard') }}
+        </a>
+        <a href="/settings" class="nav-item {% if request.url.path == '/settings' %}active{% endif %}">
+          <span class="nav-icon">⚙️</span> {{ t.settings|default('Settings') }}
+        </a>
+      </nav>
 
-    <!-- Language switcher -->
-    <div class="lang-switcher">
-      {% for l in supported_langs %}
-      <a href="/api/language/{{ l }}" class="lang-btn {% if l == lang %}active{% endif %}">
-        {{ lang_names.get(l, l.upper()) }}
-      </a>
-      {% endfor %}
-    </div>
+      <div class="sidebar-section">{{ t.language|default('Language') }}</div>
+      <div class="lang-switcher">
+        {% for l in supported_langs %}
+        <a href="/api/language/{{ l }}" class="lang-chip {% if lang == l %}active{% endif %}">
+          {{ lang_names.get(l, l|upper) }}
+        </a>
+        {% endfor %}
+      </div>
 
-    <div class="sidebar-footer">
-      <a href="/logout" class="btn-logout">🚪 {{ t.get('logout', 'Logout') }}</a>
-    </div>
-  </aside>
+      <div class="sidebar-footer">
+        <a href="/logout" class="btn-logout">
+          <span>🚪</span> {{ t.logout|default('Logout') }}
+        </a>
+      </div>
+    </aside>
 
-  <!-- Main -->
-  <main class="main-content">
-    {% block content %}{% endblock %}
-  </main>
-</div>
+    <!-- Main content -->
+    <main class="main-content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
 
-<!-- Toast container -->
-<div id="toast-container"></div>
+  <!-- Toast container -->
+  <div id="toast-container"></div>
 
-<!-- Modal overlay -->
-<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()"></div>
+  <!-- Global modals -->
+  <div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()"></div>
+  <div id="modal-container"></div>
 
-<script src="/static/js/app.js"></script>
-{% block scripts %}{% endblock %}
+  <script src="/static/js/app.js"></script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -3,6 +3,7 @@ import secrets
 import logging
 import uuid
 import base64
+import shlex
 from .ssh_manager import SSHManager
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ if [ ! -f {XRAY_CERT} ]; then
     openssl req -x509 -newkey rsa:2048 \\
         -keyout {XRAY_KEY} \\
         -out {XRAY_CERT} \\
-        -days 3650 -nodes -subj '/CN=xray-panel' 2>/dev/null
+        -days 3650 -nodes -subj '/CN=xray-panel' \\
+        -addext 'subjectAltName=DNS:xray-panel' 2>/dev/null
     chmod 600 {XRAY_KEY} {XRAY_CERT}
 fi
 """
@@ -41,7 +43,6 @@ INBOUND_LABELS = {
     "shadowsocks":   "Shadowsocks 2022",
 }
 
-# Map panel protocol key → Xray inbound type
 PROTO_TO_ITYPE = {
     "xray":         "vless-reality",
     "xray_ws":      "vless-ws",
@@ -79,14 +80,34 @@ class XrayManager:
 
         log(f"Adding {INBOUND_LABELS.get(inbound_type, inbound_type)} inbound on port {port}...")
         config = self._read_config()
-        inbound_id = str(uuid.uuid4())
 
+        # Port conflict check (new in v2.1)
+        for ib in config.get("inbounds", []):
+            if ib.get("port") == port:
+                raise ValueError(
+                    f"Port {port} is already used by inbound "
+                    f"'{ib.get('tag', '?')}' ({ib.get('protocol', '?')})"
+                )
+
+        inbound_id = str(uuid.uuid4())
         inbound, extra = self._build_inbound(inbound_type, port, inbound_id, **kwargs)
         config["inbounds"].append(inbound)
         self._write_config(config)
 
         log("Restarting Xray service...")
-        self.ssh.run_sudo("systemctl restart xray")
+        out, err, code = self.ssh.run_sudo("systemctl restart xray")
+        if code != 0:
+            # Rollback on failure
+            logger.error("Xray restart failed: %s", err)
+            try:
+                config["inbounds"] = [
+                    ib for ib in config["inbounds"] if ib.get("tag") != inbound_id
+                ]
+                self._write_config(config)
+                self.ssh.run_sudo("systemctl restart xray 2>/dev/null || true")
+            except Exception:
+                pass
+            raise RuntimeError(f"Xray failed to restart: {err.strip()}")
 
         log(f"Opening firewall port {port}/tcp...")
         self.ssh.open_port(port, "tcp")
@@ -103,37 +124,31 @@ class XrayManager:
     def remove_inbound(self, inbound_id: str):
         try:
             config = self._read_config()
-            config["inbounds"] = [ib for ib in config["inbounds"] if ib.get("tag") != inbound_id]
+            config["inbounds"] = [
+                ib for ib in config.get("inbounds", []) if ib.get("tag") != inbound_id
+            ]
             self._write_config(config)
             self.ssh.run_sudo("systemctl restart xray")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Failed to remove inbound %s: %s", inbound_id, e)
+            raise
 
     def uninstall(self):
         self.ssh.run_sudo("systemctl stop xray 2>/dev/null || true")
         self.ssh.run_sudo(
-            'bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove 2>/dev/null || true'
+            'bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" '
+            '@ remove 2>/dev/null || true'
         )
 
     def add_client(self, inbound_id: str, inbound_type: str, client_name: str) -> dict:
         config = self._read_config()
         client_id = str(uuid.uuid4())
 
-        for ib in config["inbounds"]:
+        for ib in config.get("inbounds", []):
             if ib.get("tag") != inbound_id:
                 continue
 
-            if inbound_type in ("shadowsocks",):
-                password = secrets.token_urlsafe(16)
-                ib["settings"]["clients"].append({
-                    "password": password,
-                    "email": client_name,
-                })
-                self._write_config(config)
-                self.ssh.run_sudo("systemctl restart xray")
-                return {"id": client_id, "name": client_name, "password": password}
-
-            elif inbound_type == "trojan-tcp":
+            if inbound_type in ("shadowsocks", "trojan-tcp"):
                 password = secrets.token_urlsafe(16)
                 ib["settings"]["clients"].append({
                     "password": password,
@@ -157,7 +172,7 @@ class XrayManager:
 
     def remove_client(self, inbound_id: str, inbound_type: str, client_identifier: str):
         config = self._read_config()
-        for ib in config["inbounds"]:
+        for ib in config.get("inbounds", []):
             if ib.get("tag") != inbound_id:
                 continue
             if inbound_type in ("shadowsocks", "trojan-tcp"):
@@ -226,7 +241,6 @@ class XrayManager:
             password = client.get("password", "")
             method   = "2022-blake3-aes-128-gcm"
             srv_pass = inbound.get("server_password", "")
-            # SS2022 format: ss://method:serverpw:userpw@host:port
             combo = base64.b64encode(f"{method}:{srv_pass}:{password}".encode()).decode()
             return f"ss://{combo}@{server_host}:{port}#{name}"
 
@@ -236,12 +250,17 @@ class XrayManager:
 
     def _build_inbound(self, itype: str, port: int, tag: str, **kwargs) -> tuple[dict, dict]:
 
-        tls_stream = lambda net, **extra: {
-            "network": net,
-            "security": "tls",
-            "tlsSettings": {"certificates": [{"certificateFile": XRAY_CERT, "keyFile": XRAY_KEY}]},
-            **extra,
-        }
+        def tls_stream(net, **extra):
+            return {
+                "network": net,
+                "security": "tls",
+                "tlsSettings": {
+                    "certificates": [
+                        {"certificateFile": XRAY_CERT, "keyFile": XRAY_KEY}
+                    ]
+                },
+                **extra,
+            }
 
         if itype == "vless-reality":
             priv, pub, sid = self._gen_reality_keys()

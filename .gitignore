@@ -1,12 +1,53 @@
-.env
-data/
+# ── Python ──────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
-.DS_Store
-*.egg-info/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
-.venv/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── Virtual environments ────────────────────────
 venv/
+.venv/
+env/
+ENV/
+
+# ── IDE / editor ────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Project data (NEVER commit secrets!) ────────
+data/
+data.json
+.env
+.env.local
+.env.*.local
+*.corrupt
+data/.secret_key
+data/.encryption_key
+data/known_hosts
+
+# ── Logs ────────────────────────────────────────
 *.log
+logs/
+
+# ── Tests / coverage ────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── OS / misc ───────────────────────────────────
+.DS_Store
+*.bak
+*.tmp

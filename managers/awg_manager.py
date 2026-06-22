@@ -1,7 +1,6 @@
 import secrets
-import struct
 import logging
-from typing import Optional
+import shlex
 from .ssh_manager import SSHManager
 from utils import parse_wg_dump
 
@@ -46,6 +45,8 @@ fi
 
 
 def _gen_keypair() -> tuple[str, str]:
+    """Generate WireGuard keypair locally using cryptography library — never on
+    the remote server (avoids shell history / stdout leakage)."""
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
     import base64
     priv = X25519PrivateKey.generate()
@@ -87,11 +88,20 @@ class AWGManager:
         return self._exec(f"docker exec {AWG_CONTAINER} {cmd}", timeout)
 
     def install_docker(self):
-        self._exec("bash -c '" + DOCKER_INSTALL_SCRIPT.replace("'", "'\\''") + "'", 300)
+        # Upload the script and execute — avoids shell-quoting pitfalls
+        tmp = "/tmp/.awg_docker_install.sh"
+        self.ssh.upload_file(DOCKER_INSTALL_SCRIPT, tmp)
+        try:
+            self.ssh.run_sudo(f"bash {shlex.quote(tmp)}", 300)
+        finally:
+            self.ssh.run_command(f"rm -f {shlex.quote(tmp)}")
 
     def is_installed(self) -> bool:
-        out, _, code = self._exec(f"docker inspect --format='{{{{.State.Running}}}}' {AWG_CONTAINER} 2>/dev/null")
-        return code == 0 and "true" in out.lower()
+        out, _, code = self._exec(
+            f"docker inspect --format='{{{{.State.Running}}}}' {AWG_CONTAINER} 2>/dev/null"
+        )
+        # Strict equality — avoid matching "Not true" or similar
+        return code == 0 and out.strip().lower() == "true"
 
     def install(self, port: int = 51820, subnet: str = "10.8.1.0/24",
                 dns: str = "1.1.1.1", progress=None) -> dict:
@@ -105,7 +115,7 @@ class AWGManager:
         log("Creating AmneziaWG directory...")
         self._exec(f"mkdir -p {AWG_DIR}")
 
-        log("Generating WireGuard keys...")
+        log("Generating WireGuard keys locally (not on server)...")
         priv_key, pub_key = _gen_keypair()
         params = _rand_awg_params()
 
@@ -125,8 +135,13 @@ class AWGManager:
         self._exec(f"docker build -t {AWG_CONTAINER} {AWG_DIR}", timeout=600)
 
         log("Starting AmneziaWG container...")
+        # Use --cap-add=NET_ADMIN + port mapping instead of --privileged --net=host
         self._exec(
-            f"docker run -d --name {AWG_CONTAINER} --privileged --net=host "
+            f"docker run -d --name {AWG_CONTAINER} "
+            f"--cap-add=NET_ADMIN "
+            f"--cap-add=SYS_MODULE "
+            f"--device /dev/net/tun "
+            f"-p {port}:{port}/udp "
             f"--restart=unless-stopped "
             f"-v {AWG_DIR}:/etc/amnezia/awg "
             f"{AWG_CONTAINER}",
@@ -177,6 +192,8 @@ class AWGManager:
         new_conf = self._remove_peer_from_conf(conf, public_key)
         self._write_conf(new_conf)
         self._sync()
+        # Also remove from live interface in case it was loaded
+        self._docker_exec(f"awg set wg0 peer {shlex.quote(public_key)} remove 2>/dev/null || true")
 
     def _remove_peer_from_conf(self, conf: str, public_key: str) -> str:
         sections = []
@@ -198,19 +215,26 @@ class AWGManager:
         return "\n".join(result)
 
     def toggle_client(self, public_key: str, enabled: bool):
-        conf = self._read_conf()
+        """Toggle a peer's live state using `awg set` instead of editing the
+        config file (which is fragile). When re-enabling, the peer is already
+        in the config, so we just sync; when disabling, we temporarily remove
+        it from the live interface. The config file always stays authoritative."""
         if enabled:
-            conf = conf.replace(f"#PublicKey = {public_key}", f"PublicKey = {public_key}")
+            # Re-add from config file
+            self._sync()
         else:
-            conf = conf.replace(f"PublicKey = {public_key}", f"#PublicKey = {public_key}")
-        self._write_conf(conf)
-        self._sync()
+            # Remove from live interface only (config untouched)
+            self._docker_exec(
+                f"awg set wg0 peer {shlex.quote(public_key)} remove 2>/dev/null || true"
+            )
 
     def get_traffic(self) -> dict:
         # Try docker container first, fall back to native
         out, _, code = self._docker_exec("awg show all dump")
         if code != 0:
-            out, _, code = self.ssh.run_sudo("awg show all dump 2>/dev/null || wg show all dump 2>/dev/null")
+            out, _, code = self.ssh.run_sudo(
+                "awg show all dump 2>/dev/null || wg show all dump 2>/dev/null"
+            )
         if code != 0 or not out.strip():
             return {}
         return parse_wg_dump(out)
@@ -218,7 +242,9 @@ class AWGManager:
     def get_live_peers(self) -> list[str]:
         out, _, code = self._docker_exec("awg show all dump")
         if code != 0:
-            out, _, _ = self.ssh.run_sudo("awg show all dump 2>/dev/null || wg show all dump 2>/dev/null")
+            out, _, _ = self.ssh.run_sudo(
+                "awg show all dump 2>/dev/null || wg show all dump 2>/dev/null"
+            )
         return list(parse_wg_dump(out).keys())
 
     def _detect_iface(self) -> str:
@@ -244,34 +270,47 @@ class AWGManager:
             f"H3 = {params['H3']}\n"
             f"H4 = {params['H4']}\n"
             f"\n"
-            f"PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {iface} -j MASQUERADE\n"
-            f"PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {iface} -j MASQUERADE\n"
+            f"PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; "
+            f"iptables -t nat -A POSTROUTING -o {iface} -j MASQUERADE\n"
+            f"PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; "
+            f"iptables -t nat -D POSTROUTING -o {iface} -j MASQUERADE\n"
         )
 
     def build_client_conf(self, client: dict, server: dict) -> str:
         params = server.get("awg_params", {})
-        return (
-            f"[Interface]\n"
-            f"PrivateKey = {client['private_key']}\n"
-            f"Address = {client['ip']}/32\n"
-            f"DNS = {server.get('dns', '1.1.1.1')}\n"
-            f"Jc = {params.get('Jc', 4)}\n"
-            f"Jmin = {params.get('Jmin', 40)}\n"
-            f"Jmax = {params.get('Jmax', 70)}\n"
-            f"S1 = {params.get('S1', 0)}\n"
-            f"S2 = {params.get('S2', 0)}\n"
-            f"H1 = {params.get('H1', 1)}\n"
-            f"H2 = {params.get('H2', 2)}\n"
-            f"H3 = {params.get('H3', 3)}\n"
-            f"H4 = {params.get('H4', 4)}\n"
-            f"\n"
-            f"[Peer]\n"
-            f"PublicKey = {server['server_public_key']}\n"
-            f"PresharedKey = {client['preshared_key']}\n"
-            f"Endpoint = {server['host']}:{server['port']}\n"
-            f"AllowedIPs = 0.0.0.0/0, ::/0\n"
-            f"PersistentKeepalive = 25\n"
-        )
+        # Allow per-client overrides (new in v2.1)
+        dns = client.get("dns") or server.get("dns", "1.1.1.1")
+        mtu = client.get("mtu")
+        keepalive = client.get("persistent_keepalive", 25)
+        allowed_ips = client.get("allowed_ips", "0.0.0.0/0, ::/0")
+
+        lines = [
+            "[Interface]",
+            f"PrivateKey = {client['private_key']}",
+            f"Address = {client['ip']}/32",
+            f"DNS = {dns}",
+        ]
+        if mtu:
+            lines.append(f"MTU = {mtu}")
+        lines += [
+            f"Jc = {params.get('Jc', 4)}",
+            f"Jmin = {params.get('Jmin', 40)}",
+            f"Jmax = {params.get('Jmax', 70)}",
+            f"S1 = {params.get('S1', 0)}",
+            f"S2 = {params.get('S2', 0)}",
+            f"H1 = {params.get('H1', 1)}",
+            f"H2 = {params.get('H2', 2)}",
+            f"H3 = {params.get('H3', 3)}",
+            f"H4 = {params.get('H4', 4)}",
+            "",
+            "[Peer]",
+            f"PublicKey = {server['server_public_key']}",
+            f"PresharedKey = {client['preshared_key']}",
+            f"Endpoint = {server['host']}:{server['port']}",
+            f"AllowedIPs = {allowed_ips}",
+            f"PersistentKeepalive = {keepalive}",
+        ]
+        return "\n".join(lines) + "\n"
 
     def _read_conf(self) -> str:
         return self.ssh.download_file(AWG_CONF)
@@ -280,4 +319,6 @@ class AWGManager:
         self.ssh.upload_sudo_file(content, AWG_CONF)
 
     def _sync(self):
-        self._docker_exec("awg syncconf wg0 <(awg-quick strip /etc/amnezia/awg/wg0.conf)")
+        self._docker_exec(
+            "awg syncconf wg0 <(awg-quick strip /etc/amnezia/awg/wg0.conf)"
+        )

@@ -1,4 +1,5 @@
 import logging
+import shlex
 from .ssh_manager import SSHManager
 from utils import parse_wg_dump
 
@@ -7,17 +8,23 @@ logger = logging.getLogger(__name__)
 WG_CONF = "/etc/wireguard/wg0.conf"
 
 
-def _gen_keypair_on_server(ssh: SSHManager) -> tuple[str, str]:
-    out, _, _ = ssh.run_sudo("wg genkey")
-    priv = out.strip()
-    out2, _, _ = ssh.run_sudo(f"echo '{priv}' | wg pubkey")
-    pub = out2.strip()
-    return priv, pub
+def _gen_keypair_locally() -> tuple[str, str]:
+    """Generate WireGuard keypair locally using cryptography library — same
+    approach as AWG. Avoids leaking private key through server shell."""
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    import base64
+    priv = X25519PrivateKey.generate()
+    priv_bytes = priv.private_bytes_raw()
+    pub_bytes = priv.public_key().public_bytes_raw()
+    return (
+        base64.b64encode(priv_bytes).decode(),
+        base64.b64encode(pub_bytes).decode(),
+    )
 
 
-def _gen_psk_on_server(ssh: SSHManager) -> str:
-    out, _, _ = ssh.run_sudo("wg genpsk")
-    return out.strip()
+def _gen_psk_locally() -> str:
+    import base64, secrets
+    return base64.b64encode(secrets.token_bytes(32)).decode()
 
 
 class WireGuardManager:
@@ -35,19 +42,20 @@ class WireGuardManager:
                 progress(msg)
 
         log("Installing WireGuard packages...")
-        script = f"""\
+        script = """\
 #!/bin/bash
 set -e
 apt-get update -qq
 apt-get install -y wireguard wireguard-tools iproute2 iptables
 sysctl -w net.ipv4.ip_forward=1
-echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || \\
+    echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 mkdir -p /etc/wireguard
 """
         self.ssh.run_sudo_script(script, 300)
 
-        log("Generating WireGuard key pair...")
-        priv_key, pub_key = _gen_keypair_on_server(self.ssh)
+        log("Generating WireGuard key pair locally (not on server)...")
+        priv_key, pub_key = _gen_keypair_locally()
         iface = self._detect_iface()
         network = subnet.rsplit(".", 1)[0]
         server_ip = network + ".1"
@@ -59,8 +67,10 @@ mkdir -p /etc/wireguard
             f"ListenPort = {port}\n"
             f"PrivateKey = {priv_key}\n"
             f"\n"
-            f"PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {iface} -j MASQUERADE\n"
-            f"PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {iface} -j MASQUERADE\n"
+            f"PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; "
+            f"iptables -t nat -A POSTROUTING -o {iface} -j MASQUERADE\n"
+            f"PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; "
+            f"iptables -t nat -D POSTROUTING -o {iface} -j MASQUERADE\n"
         )
         self.ssh.upload_sudo_file(conf, WG_CONF)
 
@@ -85,8 +95,8 @@ mkdir -p /etc/wireguard
         self.ssh.run_sudo(f"rm -f {WG_CONF}")
 
     def add_client(self, server_pub_key: str, client_ip: str, client_name: str) -> dict:
-        priv_key, pub_key = _gen_keypair_on_server(self.ssh)
-        psk = _gen_psk_on_server(self.ssh)
+        priv_key, pub_key = _gen_keypair_locally()
+        psk = _gen_psk_locally()
 
         peer = (
             f"\n[Peer]\n"
@@ -97,7 +107,10 @@ mkdir -p /etc/wireguard
         )
         conf = self._read_conf()
         self._write_conf(conf + peer)
-        self.ssh.run_sudo("wg addconf wg0 <(wg-quick strip /etc/wireguard/wg0.conf) 2>/dev/null || systemctl restart wg-quick@wg0")
+        self.ssh.run_sudo(
+            "wg addconf wg0 <(wg-quick strip /etc/wireguard/wg0.conf) 2>/dev/null || "
+            "systemctl restart wg-quick@wg0"
+        )
 
         return {
             "private_key": priv_key,
@@ -110,15 +123,22 @@ mkdir -p /etc/wireguard
         conf = self._read_conf()
         new_conf = self._remove_peer(conf, public_key)
         self._write_conf(new_conf)
-        self.ssh.run_sudo(f"wg set wg0 peer {public_key} remove 2>/dev/null || true")
+        # Remove from live interface (safe — quoted)
+        self.ssh.run_sudo(
+            f"wg set wg0 peer {shlex.quote(public_key)} remove 2>/dev/null || true"
+        )
 
     def toggle_client(self, public_key: str, enabled: bool):
-        conf = self._read_conf()
+        """Toggle peer's live state. Disabled = remove from live interface.
+        Enabled = re-add from config file (syncconf)."""
         if enabled:
-            conf = conf.replace(f"#PublicKey = {public_key}", f"PublicKey = {public_key}")
+            self.ssh.run_sudo(
+                "wg syncconf wg0 <(wg-quick strip /etc/wireguard/wg0.conf) 2>/dev/null"
+            )
         else:
-            conf = conf.replace(f"PublicKey = {public_key}", f"#PublicKey = {public_key}")
-        self._write_conf(conf)
+            self.ssh.run_sudo(
+                f"wg set wg0 peer {shlex.quote(public_key)} remove 2>/dev/null || true"
+            )
 
     def get_traffic(self) -> dict:
         out, _, code = self.ssh.run_sudo("wg show all dump 2>/dev/null")
@@ -131,19 +151,30 @@ mkdir -p /etc/wireguard
         return list(parse_wg_dump(out).keys())
 
     def build_client_conf(self, client: dict, server: dict) -> str:
-        return (
-            f"[Interface]\n"
-            f"PrivateKey = {client['private_key']}\n"
-            f"Address = {client['ip']}/32\n"
-            f"DNS = {server.get('dns', '1.1.1.1')}\n"
-            f"\n"
-            f"[Peer]\n"
-            f"PublicKey = {server['server_public_key']}\n"
-            f"PresharedKey = {client['preshared_key']}\n"
-            f"Endpoint = {server['host']}:{server['port']}\n"
-            f"AllowedIPs = 0.0.0.0/0, ::/0\n"
-            f"PersistentKeepalive = 25\n"
-        )
+        # Per-client overrides (new in v2.1)
+        dns = client.get("dns") or server.get("dns", "1.1.1.1")
+        mtu = client.get("mtu")
+        keepalive = client.get("persistent_keepalive", 25)
+        allowed_ips = client.get("allowed_ips", "0.0.0.0/0, ::/0")
+
+        lines = [
+            "[Interface]",
+            f"PrivateKey = {client['private_key']}",
+            f"Address = {client['ip']}/32",
+            f"DNS = {dns}",
+        ]
+        if mtu:
+            lines.append(f"MTU = {mtu}")
+        lines += [
+            "",
+            "[Peer]",
+            f"PublicKey = {server['server_public_key']}",
+            f"PresharedKey = {client['preshared_key']}",
+            f"Endpoint = {server['host']}:{server['port']}",
+            f"AllowedIPs = {allowed_ips}",
+            f"PersistentKeepalive = {keepalive}",
+        ]
+        return "\n".join(lines) + "\n"
 
     def _detect_iface(self) -> str:
         out, _, _ = self.ssh.run_sudo("ip route | grep default | awk '{print $5}' | head -1")
@@ -160,6 +191,7 @@ mkdir -p /etc/wireguard
         result = []
         in_peer = False
         skip = False
+        peer_lines: list[str] = []
         for line in lines:
             if line.strip() == "[Peer]":
                 in_peer = True

@@ -33,7 +33,7 @@ REPO="https://github.com/ScannerVpn/Amnezia-Web-Panel"
 # Install base dependencies
 info "Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq curl git ca-certificates
+apt-get install -y -qq curl git ca-certificates openssl
 
 # Install Docker
 if ! command -v docker &>/dev/null; then
@@ -48,13 +48,10 @@ fi
 
 # Install Docker Compose (plugin or standalone fallback)
 install_compose() {
-  # Try plugin via apt first (Ubuntu 22.04+ with Docker repo)
   if apt-get install -y -qq docker-compose-plugin 2>/dev/null; then
     success "Docker Compose plugin installed"
     return 0
   fi
-
-  # Fallback: download standalone binary from GitHub
   info "Downloading Docker Compose standalone binary..."
   COMPOSE_VERSION=$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest \
     | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
@@ -62,8 +59,6 @@ install_compose() {
   curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
     -o /usr/local/bin/docker-compose
   chmod +x /usr/local/bin/docker-compose
-
-  # Create shim so "docker compose" (space) works too
   mkdir -p /usr/local/lib/docker/cli-plugins
   ln -sf /usr/local/bin/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
   success "Docker Compose ${COMPOSE_VERSION} installed"
@@ -90,8 +85,9 @@ cd "$INSTALL_DIR"
 # Create .env if not exists
 if [ ! -f ".env" ]; then
   info "Generating configuration..."
-  ADMIN_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16)
-  SECRET_KEY=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 64)
+  # Use openssl for cryptographically secure random values
+  ADMIN_PASS=$(openssl rand -base64 12 | tr -d '/+=' | head -c 16)
+  SECRET_KEY=$(openssl rand -hex 32)
 
   cat > .env <<EOF
 ADMIN_USERNAME=admin
@@ -100,7 +96,8 @@ SECRET_KEY=${SECRET_KEY}
 PANEL_PORT=${PANEL_PORT}
 DATA_DIR=/app/data
 EOF
-  success ".env file created"
+  chmod 600 .env
+  success ".env file created (mode 600)"
 else
   ADMIN_PASS=$(grep ADMIN_PASSWORD .env | cut -d= -f2)
   warn ".env already exists — using existing credentials"
@@ -108,6 +105,7 @@ fi
 
 # Create data directory
 mkdir -p data
+chmod 700 data
 
 # Stop existing container
 docker compose down 2>/dev/null || true
@@ -130,6 +128,20 @@ SERVER_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || \
             curl -4 -s --max-time 5 icanhazip.com 2>/dev/null || \
             hostname -I | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -1)
 
+# Save credentials to a file (mode 600) instead of just printing to terminal
+CREDS_FILE="$INSTALL_DIR/.panel-credentials"
+cat > "$CREDS_FILE" <<EOF
+Amnezia Web Panel — Initial Credentials
+========================================
+Panel URL:   http://${SERVER_IP}:${PANEL_PORT}
+Username:    admin
+Password:    ${ADMIN_PASS}
+
+Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+========================================
+EOF
+chmod 600 "$CREDS_FILE"
+
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║    Panel installed successfully! ✅   ║${NC}"
@@ -137,9 +149,11 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 echo -e "  ${CYAN}Panel URL:${NC}   http://${SERVER_IP}:${PANEL_PORT}"
 echo -e "  ${CYAN}Username:${NC}    admin"
-echo -e "  ${CYAN}Password:${NC}    ${ADMIN_PASS}"
+echo -e "  ${CYAN}Password:${NC}    (saved to ${CREDS_FILE})"
 echo ""
-echo -e "  ${YELLOW}WARNING: Save your password in a safe place!${NC}"
+echo -e "  ${YELLOW}⚠  Credentials saved to:${NC} ${CREDS_FILE}"
+echo -e "  ${YELLOW}   View with: sudo cat ${CREDS_FILE}${NC}"
+echo -e "  ${YELLOW}   Delete after recording: sudo rm ${CREDS_FILE}${NC}"
 echo ""
 echo -e "  To update: cd ${INSTALL_DIR} && git pull && docker compose up -d --build"
 echo ""

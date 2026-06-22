@@ -1,37 +1,45 @@
 {% extends "base.html" %}
-{% block title %}{{ t.get('dashboard', 'Dashboard') }} — Amnezia Panel{% endblock %}
+{% block title %}{{ t.dashboard|default('Dashboard') }} — Amnezia Panel{% endblock %}
 
 {% block content %}
 <div class="page-header">
-  <h1 class="page-title">{{ t.get('dashboard', 'Dashboard') }}</h1>
-  <button type="button" class="btn btn-primary" onclick="openAddServerModal()">
-    + {{ t.get('add_server', 'Add Server') }}
+  <h1 class="page-title">{{ t.dashboard|default('Dashboard') }}</h1>
+  <button class="btn btn-primary" onclick="openAddServerModal()">
+    <span>+</span> {{ t.add_server|default('Add Server') }}
   </button>
 </div>
 
-<!-- Stats row -->
-<div class="stats-row">
+<!-- Stats -->
+<div class="stats-grid">
   <div class="stat-card">
-    <div class="stat-label">{{ t.get('servers', 'Servers') }}</div>
+    <div class="stat-label">{{ t.servers|default('Servers') }}</div>
     <div class="stat-value">{{ servers|length }}</div>
+    <div class="stat-icon">🖥️</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">{{ t.get('total_users', 'Total Users') }}</div>
+    <div class="stat-label">{{ t.total_users|default('Total Users') }}</div>
     <div class="stat-value">{{ total_users }}</div>
+    <div class="stat-icon">👥</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">{{ t.get('active_users', 'Active Protocols') }}</div>
+    <div class="stat-label">{{ t.active_protocols|default('Active Protocols') }}</div>
     <div class="stat-value">{{ active_protos }}</div>
+    <div class="stat-icon">⚡</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">{{ t.total_traffic|default('Total Traffic') }}</div>
+    <div class="stat-value">{{ bytes_to_human(total_traffic) }}</div>
+    <div class="stat-icon">📊</div>
   </div>
 </div>
 
 {% if not servers %}
 <div class="empty-state">
   <div class="empty-icon">🖥️</div>
-  <h2>{{ t.get('no_servers', 'No servers yet') }}</h2>
-  <p>{{ t.get('add_first_server', 'Add your first VPN server to get started') }}</p>
-  <button type="button" class="btn btn-primary" onclick="openAddServerModal()">
-    + {{ t.get('add_server', 'Add Server') }}
+  <h2>{{ t.no_servers|default('No servers yet') }}</h2>
+  <p>{{ t.no_servers_desc|default('Add your first VPN server to get started') }}</p>
+  <button class="btn btn-primary" onclick="openAddServerModal()">
+    <span>+</span> {{ t.add_server|default('Add Server') }}
   </button>
 </div>
 {% else %}
@@ -39,42 +47,51 @@
   {% for server in servers %}
   <div class="server-card" id="card-{{ server.id }}">
     <div class="server-card-header">
-      <div>
-        <div class="server-name">{{ server.name }}</div>
-        <div class="server-host">{{ server.host }}:{{ server.ssh_port }}</div>
+      <div class="server-info">
+        <h3 class="server-name">{{ server.name }}</h3>
+        <span class="server-host">{{ server.host }}:{{ server.ssh_port }}</span>
       </div>
       <div class="server-actions">
-        <button type="button" class="btn-icon" title="{{ t.get('ping', 'Ping') }}" onclick="pingServer('{{ server.id }}')">📡</button>
-        <button type="button" class="btn-icon" title="{{ t.get('reboot', 'Reboot') }}" onclick="rebootServer('{{ server.id }}', '{{ t.get('reboot_confirm', 'Reboot this server?') }}')">🔄</button>
-        <button type="button" class="btn-icon btn-danger" title="{{ t.get('delete', 'Delete') }}" onclick="deleteServer('{{ server.id }}', '{{ server.name }}')">🗑️</button>
+        <button class="btn-icon" title="{{ t.ping|default('Ping') }}" onclick="pingServer('{{ server.id }}')">📡</button>
+        <button class="btn-icon" title="{{ t.reboot|default('Reboot') }}" onclick="rebootServer('{{ server.id }}')">🔄</button>
+        <button class="btn-icon btn-danger" title="{{ t.delete|default('Delete') }}" onclick="deleteServer('{{ server.id }}', '{{ server.name|e }}')">🗑️</button>
       </div>
     </div>
 
     <div class="server-ping" id="ping-{{ server.id }}">
-      <span class="ping-dot pulsing"></span>
-      <span class="ping-text">—</span>
+      <span class="ping-dot"></span>
+      <span class="ping-text">{{ t.checking|default('Checking...') }}</span>
     </div>
 
     <div class="protocols-grid">
-      {% for pk in ['awg','wireguard','xray','openvpn'] %}
-      {% set proto = server.protocols.get(pk, {}) %}
+      {% for proto_key, proto_label, proto_emoji in [
+        ('awg', 'AmneziaWG', '🔒'),
+        ('wireguard', 'WireGuard', '🔑'),
+        ('xray', 'Xray Reality', '⚡'),
+        ('openvpn', 'OpenVPN', '🌐')
+      ] %}
+      {% set proto = server.protocols.get(proto_key, {}) %}
       <div class="protocol-badge {% if proto.get('installed') %}installed{% endif %}">
-        <span>{% if pk == 'awg' %}🔒{% elif pk == 'wireguard' %}🔑{% elif pk == 'xray' %}⚡{% else %}🌐{% endif %}</span>
-        <span>{% if pk == 'awg' %}AWG{% elif pk == 'wireguard' %}WG{% elif pk == 'xray' %}Xray{% else %}OpenVPN{% endif %}</span>
-        <span class="badge-dot {% if proto.get('installed') %}green{% else %}gray{% endif %}"></span>
+        <span>{{ proto_emoji }}</span>
+        <span>{{ proto_label }}</span>
+        {% if proto.get('installed') %}
+        <span class="badge-dot green"></span>
+        {% else %}
+        <span class="badge-dot gray"></span>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
 
     <div class="server-stats">
-      {% set total = namespace(n=0) %}
-      {% for pc in server.clients.values() %}{% set total.n = total.n + pc|length %}{% endfor %}
-      👥 {{ total.n }} {{ t.get('users', 'Users') }}
+      {% set total_clients = namespace(n=0) %}
+      {% for protocol_clients in server.clients.values() %}
+        {% set total_clients.n = total_clients.n + protocol_clients|length %}
+      {% endfor %}
+      <span>👥 {{ total_clients.n }} {{ t.users|default('users') }}</span>
     </div>
 
-    <a href="/server/{{ server.id }}" class="btn btn-outline btn-block">
-      {{ t.get('manage_server', 'Manage Server') }} →
-    </a>
+    <a href="/server/{{ server.id }}" class="btn btn-outline btn-block">{{ t.manage|default('Manage') }}</a>
   </div>
   {% endfor %}
 </div>
@@ -84,52 +101,57 @@
 <div id="add-server-modal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
-      <h2>{{ t.get('add_server', 'Add Server') }}</h2>
-      <button type="button" class="modal-close" onclick="closeModal()">✕</button>
+      <h2>{{ t.add_server|default('Add Server') }}</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <form id="add-server-form" onsubmit="submitAddServer(event)" class="modal-form">
       <div class="form-grid">
         <div class="form-group">
-          <label for="s-name">{{ t.get('server_name', 'Server Name') }}</label>
-          <input type="text" id="s-name" name="name" placeholder="Germany 1" required />
+          <label>{{ t.server_name|default('Server Name') }}</label>
+          <input type="text" name="name" placeholder="Germany VPS" required />
         </div>
         <div class="form-group">
-          <label for="s-host">{{ t.get('ip_address', 'IP Address') }}</label>
-          <input type="text" id="s-host" name="host" placeholder="1.2.3.4" required />
+          <label>{{ t.host|default('IP Address') }}</label>
+          <input type="text" name="host" placeholder="1.2.3.4" required />
         </div>
         <div class="form-group">
-          <label for="s-port">{{ t.get('ssh_port', 'SSH Port') }}</label>
-          <input type="number" id="s-port" name="ssh_port" value="22" min="1" max="65535" />
+          <label>{{ t.ssh_port|default('SSH Port') }}</label>
+          <input type="number" name="ssh_port" value="22" min="1" max="65535" />
         </div>
         <div class="form-group">
-          <label for="s-user">{{ t.get('username', 'Username') }}</label>
-          <input type="text" id="s-user" name="username" value="root" required />
+          <label>{{ t.username|default('Username') }}</label>
+          <input type="text" name="username" value="root" required />
         </div>
         <div class="form-group form-full">
-          <label for="s-pw">{{ t.get('password', 'SSH Password') }}</label>
-          <input type="password" id="s-pw" name="password" placeholder="••••••••" />
+          <label>{{ t.ssh_password|default('SSH Password') }}</label>
+          <input type="password" name="password" placeholder="••••••••" />
         </div>
         <div class="form-group form-full">
-          <label for="s-key">{{ t.get('ssh_key', 'SSH Private Key (optional)') }}</label>
-          <textarea id="s-key" name="ssh_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows="3"></textarea>
+          <label>{{ t.ssh_key|default('SSH Key (optional)') }}</label>
+          <textarea name="ssh_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." rows="4"></textarea>
         </div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.get('cancel', 'Cancel') }}</button>
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.cancel|default('Cancel') }}</button>
         <button type="submit" class="btn btn-primary" id="add-server-btn">
           <span id="add-server-spinner" class="spinner hidden"></span>
-          {{ t.get('connect_test', 'Connect & Test') }}
+          {{ t.connect|default('Add & Connect') }}
         </button>
       </div>
     </form>
   </div>
 </div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.content || '';
+
 document.addEventListener('DOMContentLoaded', () => {
-  {% for server in servers %}pingServer('{{ server.id }}', true);{% endfor %}
+  {% for server in servers %}
+  pingServer('{{ server.id }}', true);
+  {% endfor %}
 });
 
 function openAddServerModal() {
@@ -139,44 +161,56 @@ function openAddServerModal() {
 
 async function submitAddServer(e) {
   e.preventDefault();
-  setLoading('add-server-btn', 'add-server-spinner', true);
-  const fd = new FormData(e.target);
-  const body = Object.fromEntries(fd);
-  body.ssh_port = parseInt(body.ssh_port) || 22;
+  const form = e.target;
+  const btn = document.getElementById('add-server-btn');
+  const spinner = document.getElementById('add-server-spinner');
+  btn.disabled = true;
+  spinner.classList.remove('hidden');
 
-  const res = await fetch('/api/servers', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  setLoading('add-server-btn', 'add-server-spinner', false);
-  if (data.success) {
-    showToast('{{ t.get("server_added", "Server added") }}', 'success');
-    setTimeout(() => location.reload(), 800);
-  } else {
-    showToast(data.error || 'Error', 'error');
+  const data = Object.fromEntries(new FormData(form));
+  data.ssh_port = parseInt(data.ssh_port) || 22;
+
+  try {
+    const res = await fetch('/api/servers', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN},
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (json.success) {
+      showToast('Server added', 'success');
+      setTimeout(() => location.reload(), 800);
+    } else {
+      showToast(json.error || 'Connection failed', 'error');
+    }
+  } catch (err) {
+    showToast('Network error', 'error');
   }
+  btn.disabled = false;
+  spinner.classList.add('hidden');
 }
 
 async function pingServer(id, silent = false) {
   const el = document.getElementById(`ping-${id}`);
   if (!el) return;
-  if (!silent) el.innerHTML = '<span class="ping-dot pulsing"></span><span class="ping-text">...</span>';
+  if (!silent) el.innerHTML = '<span class="ping-dot pulsing"></span><span class="ping-text">Pinging...</span>';
+
   try {
-    const res = await fetch(`/api/servers/${id}/ping`, {method: 'POST'});
+    const res = await fetch(`/api/servers/${id}/ping`, {method: 'POST', headers: {'X-CSRF-Token': CSRF_TOKEN}});
     const data = await res.json();
     if (data.success) {
-      el.innerHTML = `<span class="ping-dot green"></span><span class="ping-text text-green">${data.latency_ms}ms</span>`;
+      el.innerHTML = `<span class="ping-dot green"></span><span class="ping-text">${data.latency_ms}ms</span>`;
     } else {
-      el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text text-red">Offline</span>`;
+      el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text">Offline</span>`;
     }
-  } catch {
-    el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text text-red">Error</span>`;
+  } catch (e) {
+    el.innerHTML = `<span class="ping-dot red"></span><span class="ping-text">Error</span>`;
   }
 }
 
 async function deleteServer(id, name) {
   if (!confirm(`Delete server "${name}"?`)) return;
-  const res = await fetch(`/api/servers/${id}`, {method: 'DELETE'});
+  const res = await fetch(`/api/servers/${id}`, {method: 'DELETE', headers: {'X-CSRF-Token': CSRF_TOKEN}});
   const data = await res.json();
   if (data.success) {
     document.getElementById(`card-${id}`).remove();
@@ -184,9 +218,9 @@ async function deleteServer(id, name) {
   }
 }
 
-async function rebootServer(id, msg) {
-  if (!confirm(msg)) return;
-  await fetch(`/api/servers/${id}/reboot`, {method: 'POST'});
+async function rebootServer(id) {
+  if (!confirm('Reboot server?')) return;
+  await fetch(`/api/servers/${id}/reboot`, {method: 'POST', headers: {'X-CSRF-Token': CSRF_TOKEN}});
   showToast('Reboot command sent', 'success');
 }
 </script>

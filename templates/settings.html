@@ -1,53 +1,68 @@
 {% extends "base.html" %}
-{% block title %}{{ t.get('settings','Settings') }} — Amnezia Panel{% endblock %}
+{% block title %}{{ t.settings|default('Settings') }} — Amnezia Panel{% endblock %}
 
 {% block content %}
 <div class="page-header">
-  <h1 class="page-title">⚙️ {{ t.get('settings','Settings') }}</h1>
+  <h1 class="page-title">⚙️ {{ t.settings|default('Settings') }}</h1>
 </div>
 
 <div class="settings-grid">
 
+  <!-- Change Password -->
   <div class="card">
-    <div class="card-header"><h2>{{ t.get('change_password','Change Password') }}</h2></div>
+    <div class="card-header"><h2>{{ t.change_password|default('Change Password') }}</h2></div>
     <form onsubmit="changePassword(event)" class="modal-form">
       <div class="form-group">
-        <label for="current-password">{{ t.get('current_password','Current Password') }}</label>
-        <input type="password" id="current-password" placeholder="••••••••" required />
+        <label for="current-password">{{ t.current_password|default('Current Password') }}</label>
+        <input type="password" id="current-password" placeholder="••••••••" required autocomplete="current-password" />
       </div>
       <div class="form-group">
-        <label for="new-password">{{ t.get('new_password','New Password') }}</label>
-        <input type="password" id="new-password" placeholder="••••••••" required minlength="8" />
+        <label for="new-password">{{ t.new_password|default('New Password') }}</label>
+        <input type="password" id="new-password" placeholder="••••••••" required minlength="8" autocomplete="new-password" />
       </div>
       <div class="form-group">
-        <label for="confirm-password">{{ t.get('confirm_password','Confirm New Password') }}</label>
-        <input type="password" id="confirm-password" placeholder="••••••••" required />
+        <label for="confirm-password">{{ t.confirm_password|default('Confirm New Password') }}</label>
+        <input type="password" id="confirm-password" placeholder="••••••••" required autocomplete="new-password" />
       </div>
-      <button type="submit" class="btn btn-primary">{{ t.get('save_password','Save Password') }}</button>
+      <button type="submit" class="btn btn-primary">{{ t.save|default('Save') }}</button>
     </form>
   </div>
 
+  <!-- Panel Info -->
   <div class="card">
-    <div class="card-header"><h2>{{ t.get('panel_info','Panel Info') }}</h2></div>
+    <div class="card-header"><h2>{{ t.panel_info|default('Panel Info') }}</h2></div>
     <div class="info-list">
-      <div class="info-item"><span class="info-label">{{ t.get('version','Version') }}</span><span class="info-value">{{ version }}</span></div>
-      <div class="info-item"><span class="info-label">{{ t.get('admin_username','Admin Username') }}</span><span class="info-value">{{ panel.admin_username }}</span></div>
+      <div class="info-item">
+        <span class="info-label">{{ t.version|default('Version') }}</span>
+        <span class="info-value">{{ version }}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">{{ t.admin_username|default('Admin Username') }}</span>
+        <span class="info-value">{{ panel.admin_username }}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">{{ t.total_servers|default('Servers') }}</span>
+        <span class="info-value" id="total-servers">—</span>
+      </div>
     </div>
   </div>
 
+  <!-- Update Panel -->
   <div class="card">
-    <div class="card-header"><h2>{{ t.get('update_panel','Update Panel') }}</h2></div>
+    <div class="card-header"><h2>{{ t.update_panel|default('Update Panel') }}</h2></div>
     <p class="card-hint">
-      Pull the latest code from GitHub and restart automatically.
-      If dependencies changed, rebuild manually:
+      Pulls latest code from GitHub and restarts automatically.
+      If <code>requirements.txt</code> or <code>Dockerfile</code> changed, rebuild manually:
       <code>docker compose up -d --build</code>
     </p>
     <div id="update-output" class="update-output hidden"></div>
     <div class="update-actions">
-      <button type="button" class="btn btn-outline" id="check-update-btn" onclick="checkVersion()">{{ t.get('check_version','Check Version') }}</button>
+      <button type="button" class="btn btn-outline" id="check-update-btn" onclick="checkVersion()">
+        {{ t.check_version|default('Check Version') }}
+      </button>
       <button type="button" class="btn btn-primary" id="update-btn" onclick="doUpdate()">
         <span id="update-spinner" class="spinner hidden"></span>
-        {{ t.get('update_github','Update from GitHub') }}
+        {{ t.update_from_github|default('Update from GitHub') }}
       </button>
       <span id="update-status" class="update-status-text"></span>
     </div>
@@ -64,32 +79,37 @@ async function changePassword(e) {
   const newPw   = document.getElementById('new-password').value;
   const confirm = document.getElementById('confirm-password').value;
   if (newPw !== confirm) { showToast('Passwords do not match', 'error'); return; }
-  const res  = await fetch('/api/settings/password', {
+
+  const res = await apiFetch('/api/settings/password', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({current_password: current, new_password: newPw}),
   });
+  if (!res) return;
   const data = await res.json();
   if (data.success) { showToast('Password changed', 'success'); e.target.reset(); }
   else showToast(data.error || 'Error', 'error');
 }
 
 async function checkVersion() {
-  const data = await (await fetch('/api/version')).json();
-  const out  = document.getElementById('update-output');
+  const res = await apiFetch('/api/version');
+  if (!res) return;
+  const data = await res.json();
+  const out = document.getElementById('update-output');
   out.textContent = `Version: ${data.version}\nCommit: ${data.commit}`;
   out.classList.remove('hidden');
 }
 
 async function doUpdate() {
   setLoading('update-btn', 'update-spinner', true);
-  document.getElementById('update-status').textContent = 'Pulling…';
+  document.getElementById('update-status').textContent = 'Pulling from GitHub...';
   const out = document.getElementById('update-output');
   out.classList.remove('hidden');
   out.textContent = 'Running git pull...';
 
-  const res  = await fetch('/api/update', {method: 'POST'});
-  const data = await res.json();
+  const res = await apiFetch('/api/update', {method: 'POST'});
   setLoading('update-btn', 'update-spinner', false);
+  if (!res) return;
+  const data = await res.json();
 
   if (!data.success) {
     out.textContent = '✕ ' + (data.error || 'Update failed');
@@ -97,17 +117,19 @@ async function doUpdate() {
     showToast(data.error || 'Update failed', 'error');
     return;
   }
+
   out.textContent = data.message || 'Done.';
+
   if (data.restarting) {
-    document.getElementById('update-status').textContent = 'Restarting…';
-    showToast('{{ t.get("update_applied","Update applied — restarting") }}', 'success');
+    document.getElementById('update-status').textContent = 'Restarting panel...';
+    showToast('Update applied — restarting in 3s', 'success');
     setTimeout(() => location.reload(), 5000);
   } else if (data.needs_rebuild) {
-    document.getElementById('update-status').textContent = '⚠️ {{ t.get("rebuild_required","Rebuild required") }}';
+    document.getElementById('update-status').textContent = '⚠️ Rebuild required';
     showToast('Run: docker compose up -d --build', 'info');
   } else {
-    document.getElementById('update-status').textContent = '{{ t.get("already_uptodate","Already up to date") }}';
-    showToast('{{ t.get("already_uptodate","Already up to date") }}', 'info');
+    document.getElementById('update-status').textContent = 'Already up to date';
+    showToast('Already up to date', 'info');
   }
 }
 </script>

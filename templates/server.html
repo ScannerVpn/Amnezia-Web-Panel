@@ -4,23 +4,28 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <a href="/" class="back-link">{{ t.get('back', '← Dashboard') }}</a>
+    <a href="/" class="back-link">← {{ t.dashboard|default('Dashboard') }}</a>
     <h1 class="page-title">{{ server.name }}</h1>
-    <span class="server-host-label">{{ server.username }}@{{ server.host }}:{{ server.ssh_port }}</span>
+    <span class="server-host-label">{{ server.host }} · {{ server.username }}@{{ server.host }}:{{ server.ssh_port }}</span>
   </div>
   <div class="header-actions">
-    <button type="button" class="btn btn-outline btn-sm" onclick="syncTraffic()">🔄 {{ t.get('sync_traffic','Sync Traffic') }}</button>
-    <button type="button" class="btn btn-outline btn-sm" onclick="detectExternal()">🔍 {{ t.get('detect_amnezia','Detect Amnezia Configs') }}</button>
+    <button type="button" class="btn btn-outline" onclick="syncTraffic()">🔄 {{ t.sync_traffic|default('Sync Traffic') }}</button>
+    <button type="button" class="btn btn-outline" onclick="detectExternal()">🔍 {{ t.detect_amnezia|default('Detect Amnezia') }}</button>
   </div>
 </div>
 
 <!-- Protocol Tabs -->
-<div class="tabs">
+<div class="tabs" id="proto-tabs">
   {% for proto_key, proto_label in [
-    ('awg','AmneziaWG'),('wireguard','WireGuard'),
-    ('xray','Reality'),('xray_ws','VLESS WS'),('xray_grpc','VLESS gRPC'),
-    ('xray_vmess','VMess WS'),('xray_trojan','Trojan'),('xray_ss','Shadowsocks'),
-    ('openvpn','OpenVPN')
+    ('awg',         'AmneziaWG'),
+    ('wireguard',   'WireGuard'),
+    ('xray',        'VLESS Reality'),
+    ('xray_ws',     'VLESS WS'),
+    ('xray_grpc',   'VLESS gRPC'),
+    ('xray_vmess',  'VMess WS'),
+    ('xray_trojan', 'Trojan'),
+    ('xray_ss',     'Shadowsocks'),
+    ('openvpn',     'OpenVPN'),
   ] %}
   <button type="button" class="tab-btn {% if loop.first %}active{% endif %}"
           onclick="switchTab('{{ proto_key }}', this)">
@@ -30,150 +35,200 @@
   {% endfor %}
 </div>
 
-<!-- Protocol Panels -->
 {% for proto_key, proto_label, proto_emoji, proto_desc in [
-  ('awg','AmneziaWG','🔒','WireGuard + DPI-bypass obfuscation'),
-  ('wireguard','WireGuard','🔑','Fast modern VPN'),
-  ('xray','VLESS + Reality','⚡','Best DPI bypass, no domain needed'),
-  ('xray_ws','VLESS WebSocket','🌊','CDN compatible, WS+TLS'),
-  ('xray_grpc','VLESS gRPC','📶','CDN compatible, multiplexed gRPC'),
-  ('xray_vmess','VMess WebSocket','📡','VMess+WS+TLS — wide support'),
-  ('xray_trojan','Trojan','🐴','Trojan over TLS'),
-  ('xray_ss','Shadowsocks 2022','🌑','Lightweight obfuscation'),
-  ('openvpn','OpenVPN','🌐','Classic VPN')
+  ('awg',         'AmneziaWG',        '🔒', 'WireGuard + DPI-bypass obfuscation — best for Iran/China'),
+  ('wireguard',   'WireGuard',        '🔑', 'Fast modern VPN, no obfuscation'),
+  ('xray',        'VLESS + Reality',  '⚡', 'Mimics HTTPS traffic — hardest to detect, no domain needed'),
+  ('xray_ws',     'VLESS WebSocket',  '🌊', 'VLESS over WebSocket + TLS — CDN compatible'),
+  ('xray_grpc',   'VLESS gRPC',       '📶', 'VLESS over gRPC + TLS — CDN compatible, multiplexed'),
+  ('xray_vmess',  'VMess WebSocket',  '📡', 'VMess over WebSocket + TLS — widely supported'),
+  ('xray_trojan', 'Trojan',           '🐴', 'Trojan protocol over TLS — looks like normal HTTPS'),
+  ('xray_ss',     'Shadowsocks 2022', '🌑', 'Shadowsocks 2022 — simple & fast obfuscation'),
+  ('openvpn',     'OpenVPN',          '🌐', 'Classic VPN, broad client support'),
 ] %}
 {% set proto = server.protocols.get(proto_key, {}) %}
 {% set clients = server.clients.get(proto_key, {}) %}
 
 <div id="tab-{{ proto_key }}" class="tab-content {% if not loop.first %}hidden{% endif %}">
 
-  <!-- Protocol header -->
+  <!-- Protocol Header -->
   <div class="protocol-header">
     <div class="protocol-info">
       <span class="protocol-emoji">{{ proto_emoji }}</span>
       <div>
         <h2>{{ proto_label }}</h2>
-        <div class="proto-desc">{{ proto_desc }}</div>
+        <p class="proto-desc">{{ proto_desc }}</p>
         {% if proto.get('installed') and proto.get('port') %}
-        <div class="proto-meta">
-          Port: <code>{{ proto.port }}</code>
-          {% if proto.get('public_key') %} | PubKey: <code>{{ proto.public_key[:16] }}…</code>{% endif %}
+        <p class="proto-meta">Port: {{ proto.port }}
+          {% if proto.get('public_key') %} | Public key: <code>{{ proto.public_key[:20] }}…</code>{% endif %}
           {% if proto.get('path') %} | Path: <code>{{ proto.path }}</code>{% endif %}
-        </div>
+          {% if proto.get('service_name') %} | Service: <code>{{ proto.service_name }}</code>{% endif %}
+          {% if proto.get('dest_domain') %} | SNI: <code>{{ proto.dest_domain }}</code>{% endif %}
+        </p>
         {% endif %}
       </div>
     </div>
     <div class="protocol-status">
       {% if proto.get('installed') %}
-      <span class="status-badge installed"><span class="status-dot green"></span> {{ t.get('installed','Installed') }}</span>
-      <button type="button" class="btn btn-danger btn-sm" onclick="uninstallProtocol('{{ proto_key }}','{{ proto_label }}')">{{ t.get('remove','Remove') }}</button>
+      <span class="status-badge installed"><span class="status-dot green"></span> Installed</span>
+      <button type="button" class="btn btn-danger btn-sm"
+              onclick="uninstallProtocol('{{ proto_key }}', '{{ proto_label }}')">{{ t.remove|default('Remove') }}</button>
       {% elif clients %}
-      <span class="status-badge detected"><span class="status-dot blue"></span> {{ t.get('detected_amnezia','Detected') }}</span>
-      <button type="button" class="btn btn-primary btn-sm" onclick="openInstallModal('{{ proto_key }}','{{ proto_label }}')">{{ t.get('install_via_panel','Install via Panel') }}</button>
+      <span class="status-badge detected"><span class="status-dot blue"></span> Detected (Amnezia App)</span>
+      <button type="button" class="btn btn-primary btn-sm"
+              onclick="openInstallModal('{{ proto_key }}', '{{ proto_label }}')">{{ t.install_via_panel|default('Install') }}</button>
       {% else %}
-      <span class="status-badge not-installed"><span class="status-dot gray"></span> {{ t.get('not_installed','Not Installed') }}</span>
-      <button type="button" class="btn btn-primary btn-sm" onclick="openInstallModal('{{ proto_key }}','{{ proto_label }}')">{{ t.get('install','Install') }}</button>
+      <span class="status-badge not-installed"><span class="status-dot gray"></span> Not installed</span>
+      <button type="button" class="btn btn-primary btn-sm"
+              onclick="openInstallModal('{{ proto_key }}', '{{ proto_label }}')">{{ t.install|default('Install') }}</button>
       {% endif %}
     </div>
   </div>
 
   {% if proto.get('installed') or clients %}
-  <!-- Clients section -->
+  <!-- Clients Section -->
   <div class="clients-section">
     <div class="clients-header">
-      <h3>{{ t.get('users','Users') }} ({{ clients|length }})</h3>
-      <div class="clients-header-actions">
-        {% if proto.get('installed') %}
-        <button type="button" class="btn btn-primary btn-sm" onclick="openAddClientModal('{{ proto_key }}')">+ {{ t.get('add_user','Add User') }}</button>
-        <button type="button" class="btn btn-outline btn-sm" onclick="openBulkModal('{{ proto_key }}')">📋 {{ t.get('bulk_create','Bulk') }}</button>
-        <a href="/api/servers/{{ server.id }}/protocols/{{ proto_key }}/clients/export" class="btn btn-outline btn-sm">⬇ {{ t.get('export_csv','Export') }}</a>
-        {% endif %}
+      <h3>{{ t.users|default('Users') }} ({{ clients|length }})</h3>
+      {% if proto.get('installed') %}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="openBulkCreateModal('{{ proto_key }}')">+ Bulk</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="exportClients('{{ proto_key }}')">📥 CSV</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="openAddClientModal('{{ proto_key }}')">+ {{ t.add_user|default('Add User') }}</button>
       </div>
+      {% endif %}
     </div>
 
     {% if clients %}
-    <div class="search-bar">
-      <input type="text" class="search-input" placeholder="{{ t.get('search_users','Search users…') }}"
-             oninput="filterClients(this, '{{ proto_key }}')" />
+    <div class="clients-toolbar">
+      <div class="toolbar-search">
+        <input type="text" id="search-{{ proto_key }}" placeholder="Search by name, email, IP..."
+               oninput="filterClients('{{ proto_key }}')" />
+      </div>
+      <select class="toolbar-select" id="filter-status-{{ proto_key }}" onchange="filterClients('{{ proto_key }}')">
+        <option value="all">All</option>
+        <option value="enabled">Enabled</option>
+        <option value="disabled">Disabled</option>
+        <option value="expired">Expired</option>
+        <option value="expiring">Expiring (7d)</option>
+      </select>
+      <select class="toolbar-select" id="sort-{{ proto_key }}" onchange="sortClients('{{ proto_key }}')">
+        <option value="name-asc">Name ↑</option>
+        <option value="name-desc">Name ↓</option>
+        <option value="traffic-desc">Traffic ↓</option>
+        <option value="created-desc">Newest</option>
+        <option value="expiry-asc">Expiring soon</option>
+      </select>
+      <span class="toolbar-info" id="count-{{ proto_key }}">{{ clients|length }} users</span>
     </div>
+
     <div class="table-wrapper">
       <table class="clients-table" id="table-{{ proto_key }}">
         <thead>
           <tr>
-            <th>{{ t.get('name','Name') }}</th>
-            {% if proto_key in ('awg','wireguard') %}<th>{{ t.get('ip','IP') }}</th>{% endif %}
-            <th>{{ t.get('traffic','Traffic') }}</th>
-            {% if proto_key in ('awg','wireguard') %}<th>{{ t.get('limit','Limit') }}</th>{% endif %}
-            <th>{{ t.get('expires','Expires') }}</th>
-            <th>{{ t.get('last_seen','Last Seen') }}</th>
-            <th>{{ t.get('status','Status') }}</th>
-            <th>{{ t.get('source','Source') }}</th>
-            <th>{{ t.get('actions','Actions') }}</th>
+            <th style="width:32px"><input type="checkbox" class="row-checkbox" onchange="toggleAll('{{ proto_key }}', this)" /></th>
+            <th>Name</th>
+            {% if proto_key in ('awg', 'wireguard') %}<th>IP</th>{% endif %}
+            <th>Traffic</th>
+            {% if proto_key in ('awg', 'wireguard') %}<th>Limit</th>{% endif %}
+            <th>Expires</th>
+            <th>Last Seen</th>
+            <th>Status</th>
+            <th>Source</th>
+            <th>Actions</th>
           </tr>
         </thead>
-        <tbody>
-          {% for cid, c in clients.items() %}
-          {% set is_expired = c.get('expires_at') and c.get('expires_at') < now_iso() %}
-          <tr id="cr-{{ cid }}" class="{% if not c.enabled %}disabled-row{% endif %}"
-              data-name="{{ c.name|lower }}">
+        <tbody id="tbody-{{ proto_key }}">
+          {% for client_id, client in clients.items() %}
+          <tr id="client-row-{{ client_id }}"
+              class="{% if not client.enabled %}disabled-row{% endif %}"
+              data-name="{{ client.name|e }}"
+              data-ip="{{ client.get('ip', '') }}"
+              data-enabled="{{ 'true' if client.enabled else 'false' }}"
+              data-traffic="{{ (client.traffic_rx|default(0) + client.traffic_tx|default(0)) }}"
+              data-created="{{ client.created_at or '' }}"
+              data-expires="{{ client.expires_at or '' }}">
+            <td><input type="checkbox" class="row-checkbox" value="{{ client_id }}" onchange="updateBulkActions('{{ proto_key }}')" /></td>
             <td>
-              <div class="client-name">{{ c.name }}</div>
-              {% if c.get('email') %}<div class="muted client-sub">{{ c.email }}</div>{% endif %}
-              {% if c.get('notes') %}<div class="muted client-sub">📝 {{ c.notes[:30] }}{% if c.notes|length > 30 %}…{% endif %}</div>{% endif %}
+              <div class="client-name">{{ client.name }}</div>
+              {% if client.email %}<div style="font-size:11px;color:var(--text-muted)">{{ client.email }}</div>{% endif %}
+              {% if client.notes %}<div style="font-size:11px;color:var(--text-muted);font-style:italic" title="{{ client.notes }}">📝</div>{% endif %}
             </td>
-            {% if proto_key in ('awg','wireguard') %}
-            <td><code>{{ c.get('ip','—') }}</code></td>
+
+            {% if proto_key in ('awg', 'wireguard') %}
+            <td><code>{{ client.get('ip', '—') }}</code></td>
             {% endif %}
+
             <td>
               <div class="traffic-info">
-                <span>↓ {{ bytes_to_human(c.traffic_rx|int) }}</span>
-                <span>↑ {{ bytes_to_human(c.traffic_tx|int) }}</span>
+                <span>↓ {{ bytes_to_human(client.traffic_rx|default(0)|int) }}</span>
+                <span>↑ {{ bytes_to_human(client.traffic_tx|default(0)|int) }}</span>
               </div>
-              {% if c.traffic_limit_bytes %}
-              {% set pct = (((c.traffic_rx + c.traffic_tx) / c.traffic_limit_bytes) * 100)|int %}
-              <div class="traffic-bar"><div class="traffic-fill js-bar {% if pct>90 %}danger{% elif pct>70 %}warning{% endif %}" data-pct="{{ [pct,100]|min }}"></div></div>
-              <small>{{ pct }}%</small>
+              {% if client.traffic_limit_bytes %}
+              {% set used_pct = (((client.traffic_rx|default(0) + client.traffic_tx|default(0)) / client.traffic_limit_bytes) * 100)|int %}
+              <div class="traffic-bar">
+                <div class="traffic-fill {% if used_pct > 90 %}danger{% elif used_pct > 70 %}warning{% endif %}"
+                     style="--bar-width: {{ [used_pct, 100]|min }}%"></div>
+              </div>
+              <small>{{ used_pct }}%</small>
               {% endif %}
             </td>
-            {% if proto_key in ('awg','wireguard') %}
-            <td>{% if c.traffic_limit_bytes %}{{ bytes_to_human(c.traffic_limit_bytes|int) }}{% else %}<span class="muted">{{ t.get('unlimited','Unlimited') }}</span>{% endif %}</td>
+
+            {% if proto_key in ('awg', 'wireguard') %}
+            <td>
+              {% if client.traffic_limit_bytes %}
+              {{ bytes_to_human(client.traffic_limit_bytes|int) }}
+              {% else %}<span class="muted">∞</span>{% endif %}
+            </td>
             {% endif %}
+
             <td>
-              {% if c.get('expires_at') %}
-              <span class="expiry-badge {% if is_expired %}expired{% else %}active{% endif %}">
-                {{ c.expires_at[:10] }}
-              </span>
-              {% else %}<span class="muted">—</span>{% endif %}
+              {% if client.expires_at %}
+              <span class="last-seen">{{ client.expires_at[:10] }}</span>
+              {% else %}<span class="muted">∞</span>{% endif %}
             </td>
-            <td>{% if c.last_seen %}<span class="muted">{{ c.last_seen[:10] }}</span>{% else %}<span class="muted">{{ t.get('never','Never') }}</span>{% endif %}</td>
+
             <td>
-              {% if proto_key in ('awg','wireguard') %}
-              <button type="button" class="toggle-btn" onclick="toggleClient('{{ proto_key }}','{{ cid }}',this)">
-                {% if c.enabled %}✅{% else %}❌{% endif %}
-              </button>
+              {% if client.last_seen %}
+              <span class="last-seen" title="{{ client.last_seen }}">{{ client.last_seen[:10] }}</span>
+              {% else %}<span class="muted">Never</span>{% endif %}
+            </td>
+
+            <td>
+              {% if proto_key in ('awg', 'wireguard') %}
+              <button type="button" class="toggle-btn {% if client.enabled %}enabled{% else %}disabled{% endif %}"
+                      onclick="toggleClient('{{ proto_key }}', '{{ client_id }}', this)"></button>
               {% else %}
-              <span class="status-dot {% if c.enabled %}green{% else %}gray{% endif %}"></span>
+              <span class="status-dot {% if client.enabled %}green{% else %}gray{% endif %}"></span>
               {% endif %}
             </td>
+
             <td>
-              {% if c.source == 'amnezia_app' %}
-              <span class="source-badge amnezia">📱 {{ t.get('amnezia_source','Amnezia') }}</span>
+              {% if client.source == 'amnezia_app' %}
+              <span class="source-badge amnezia">📱 Amnezia</span>
               {% else %}
-              <span class="source-badge panel">🖥 {{ t.get('panel_source','Panel') }}</span>
+              <span class="source-badge panel">🖥️ Panel</span>
               {% endif %}
             </td>
+
             <td>
               <div class="action-buttons">
-                {% if c.source != 'amnezia_app' or c.get('private_key') %}
-                <button type="button" class="btn-icon" title="{{ t.get('download_config','Download') }}" onclick="downloadConfig('{{ proto_key }}','{{ cid }}')">📥</button>
+                {% if client.source != 'amnezia_app' or client.get('private_key') %}
+                <button type="button" class="btn-icon" title="Download config"
+                        onclick="downloadConfig('{{ proto_key }}', '{{ client_id }}')">📥</button>
                 {% if proto_key != 'openvpn' %}
-                <button type="button" class="btn-icon" title="{{ t.get('show_qr','QR') }}" onclick="showQR('{{ proto_key }}','{{ cid }}','{{ c.name }}')">📱</button>
+                <button type="button" class="btn-icon" title="QR Code"
+                        onclick="showQR('{{ proto_key }}', '{{ client_id }}', '{{ client.name|e }}')">📱</button>
                 {% endif %}
-                {% else %}
-                <span class="muted" title="{{ t.get('on_device','On device') }}">📱</span>
                 {% endif %}
-                <button type="button" class="btn-icon" title="Edit" onclick="openEditModal('{{ proto_key }}','{{ cid }}','{{ c.name }}','{{ c.get('email','') }}','{{ c.get('notes','') }}','{{ c.get('expires_at','') }}','{{ (c.traffic_limit_bytes//1024**3)|int }}')">✏️</button>
-                <button type="button" class="btn-icon btn-danger" title="{{ t.get('delete_user','Delete') }}" onclick="deleteClient('{{ proto_key }}','{{ cid }}','{{ c.name }}')">🗑️</button>
+                <button type="button" class="btn-icon" title="Edit"
+                        onclick="openEditClientModal('{{ proto_key }}', '{{ client_id }}')">✏️</button>
+                {% if proto.get('installed') %}
+                <button type="button" class="btn-icon" title="Clone"
+                        onclick="cloneClient('{{ proto_key }}', '{{ client_id }}', '{{ client.name|e }}')">📋</button>
+                {% endif %}
+                <button type="button" class="btn-icon btn-danger" title="Delete"
+                        onclick="deleteClient('{{ proto_key }}', '{{ client_id }}', '{{ client.name|e }}')">🗑️</button>
               </div>
             </td>
           </tr>
@@ -181,186 +236,255 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Bulk actions bar (hidden by default) -->
+    <div id="bulk-actions-{{ proto_key }}" class="bulk-actions-bar hidden" style="display:none;padding:12px 20px;background:var(--accent-soft);border-top:1px solid var(--accent);gap:8px;align-items:center;flex-wrap:wrap">
+      <span id="bulk-count-{{ proto_key }}" style="font-size:13px;font-weight:600;color:var(--accent)">0 selected</span>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="bulkToggle('{{ proto_key }}', true)">Enable</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="bulkToggle('{{ proto_key }}', false)">Disable</button>
+      <button type="button" class="btn btn-danger btn-sm" onclick="bulkDelete('{{ proto_key }}')">Delete Selected</button>
+    </div>
     {% else %}
-    <div class="empty-clients">{{ t.get('add_user','Add users') }} →</div>
+    <div class="empty-clients">No users yet — click "{{ t.add_user|default('Add User') }}" to create one.</div>
     {% endif %}
   </div>
   {% endif %}
 </div>
 {% endfor %}
 
-<!-- Install Modal -->
+<!-- ── Install Modal ──────────────────────────────────────────────────────── -->
 <div id="install-modal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
-      <h2 id="install-modal-title">{{ t.get('install','Install') }}</h2>
+      <h2 id="install-modal-title">Install Protocol</h2>
       <button type="button" class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div id="install-modal-body" class="modal-form-body"></div>
+
     <div id="install-progress" class="hidden">
       <div class="progress-box" id="install-log"></div>
       <div class="progress-status">
-        <span class="spinner" id="p-spinner"></span>
-        <span id="p-status">{{ t.get('installing','Installing…') }}</span>
+        <span class="spinner" id="progress-spinner"></span>
+        <span id="progress-status-text">Installing...</span>
       </div>
     </div>
-    <div class="modal-footer" id="install-footer">
-      <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.get('cancel','Cancel') }}</button>
-      <button type="button" id="install-confirm-btn" class="btn btn-primary" onclick="confirmInstall()">
-        {{ t.get('install','Install') }}
-      </button>
+
+    <div class="modal-footer" id="install-modal-footer">
+      <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button type="button" id="install-confirm-btn" class="btn btn-primary" onclick="confirmInstall()">Install</button>
     </div>
   </div>
 </div>
 
-<!-- Add Client Modal -->
+<!-- ── Add Client Modal ──────────────────────────────────────────────────── -->
 <div id="add-client-modal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
-      <h2>{{ t.get('add_user','Add User') }}</h2>
+      <h2>Add User</h2>
       <button type="button" class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <form onsubmit="submitAddClient(event)" class="modal-form">
-      <div class="form-group">
-        <label for="c-name">{{ t.get('user_name','Name') }}</label>
-        <input type="text" id="c-name" placeholder="user1" required />
-      </div>
-      <div class="form-group">
-        <label for="c-email">{{ t.get('user_email','Email (optional)') }}</label>
-        <input type="email" id="c-email" placeholder="user@example.com" />
-      </div>
-      <div class="form-group">
-        <label for="c-notes">{{ t.get('user_notes','Notes (optional)') }}</label>
-        <input type="text" id="c-notes" placeholder="Paid until June…" />
-      </div>
       <div class="form-grid">
         <div class="form-group">
-          <label for="c-limit">{{ t.get('traffic_limit_gb','Traffic Limit GB') }}</label>
-          <input type="number" id="c-limit" placeholder="0" value="0" min="0" />
+          <label>Name</label>
+          <input type="text" id="new-client-name" placeholder="user1" required />
         </div>
         <div class="form-group">
-          <label for="c-days">{{ t.get('validity_days','Validity (days)') }}</label>
-          <input type="number" id="c-days" placeholder="0" value="0" min="0" />
+          <label>Email (optional)</label>
+          <input type="email" id="new-client-email" placeholder="user@example.com" />
+        </div>
+        <div class="form-group">
+          <label>Traffic Limit (GB, 0 = ∞)</label>
+          <input type="number" id="new-client-limit" value="0" min="0" />
+        </div>
+        <div class="form-group">
+          <label>Validity (days, 0 = ∞)</label>
+          <input type="number" id="new-client-validity" value="0" min="0" />
+        </div>
+        <div class="form-group form-full">
+          <label>Notes (optional)</label>
+          <textarea id="new-client-notes" rows="2" placeholder="Customer info, expiry date, etc."></textarea>
         </div>
       </div>
-      <div class="form-group">
-        <label for="c-expires">{{ t.get('expiry_date','Expiry Date') }}</label>
-        <input type="date" id="c-expires" />
-      </div>
-      <input type="hidden" id="c-proto" title="protocol" aria-hidden="true" />
+
+      <!-- Advanced options (collapsible) -->
+      <details style="margin-top:16px;border-top:1px solid var(--border-subtle);padding-top:16px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary);font-weight:600">⚙️ Advanced (per-client overrides)</summary>
+        <div class="form-grid" style="margin-top:12px">
+          <div class="form-group" id="adv-ip-group">
+            <label>Custom IP (optional)</label>
+            <input type="text" id="new-client-ip" placeholder="auto" />
+            <span class="form-hint">Leave empty for auto-assignment</span>
+          </div>
+          <div class="form-group">
+            <label>DNS (optional)</label>
+            <input type="text" id="new-client-dns" placeholder="1.1.1.1" />
+          </div>
+          <div class="form-group">
+            <label>MTU (optional)</label>
+            <input type="number" id="new-client-mtu" min="576" max="9000" placeholder="default" />
+          </div>
+          <div class="form-group">
+            <label>Persistent Keepalive (s)</label>
+            <input type="number" id="new-client-keepalive" min="0" max="65535" placeholder="25" />
+          </div>
+          <div class="form-group form-full">
+            <label>AllowedIPs</label>
+            <input type="text" id="new-client-allowed" placeholder="0.0.0.0/0, ::/0" />
+          </div>
+        </div>
+      </details>
+
+      <input type="hidden" id="new-client-protocol" />
       <div class="modal-footer">
-        <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.get('cancel','Cancel') }}</button>
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
         <button type="submit" class="btn btn-primary" id="add-client-btn">
-          <span id="add-client-spinner" class="spinner hidden"></span>
-          {{ t.get('add_user','Add') }}
+          <span id="add-client-spinner" class="spinner hidden"></span> Add
         </button>
       </div>
     </form>
   </div>
 </div>
 
-<!-- Bulk Create Modal -->
-<div id="bulk-modal" class="modal hidden">
-  <div class="modal-content">
-    <div class="modal-header">
-      <h2>{{ t.get('bulk_create','Bulk Create') }}</h2>
-      <button type="button" class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <form onsubmit="submitBulk(event)" class="modal-form">
-      <div class="form-grid">
-        <div class="form-group">
-          <label for="b-prefix">{{ t.get('prefix','Prefix') }}</label>
-          <input type="text" id="b-prefix" value="user" required />
-        </div>
-        <div class="form-group">
-          <label for="b-count">{{ t.get('count','Count') }}</label>
-          <input type="number" id="b-count" value="5" min="1" max="100" required />
-        </div>
-        <div class="form-group">
-          <label for="b-limit">{{ t.get('traffic_limit_gb','Traffic GB') }}</label>
-          <input type="number" id="b-limit" value="0" min="0" placeholder="0" />
-        </div>
-        <div class="form-group">
-          <label for="b-days">{{ t.get('validity_days','Days') }}</label>
-          <input type="number" id="b-days" value="30" min="0" />
-        </div>
-      </div>
-      <input type="hidden" id="b-proto" title="protocol" aria-hidden="true" />
-      <div class="modal-footer">
-        <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.get('cancel','Cancel') }}</button>
-        <button type="submit" class="btn btn-primary" id="bulk-btn">
-          <span id="bulk-spinner" class="spinner hidden"></span>
-          {{ t.get('bulk_create','Create') }}
-        </button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Edit Client Modal -->
-<div id="edit-modal" class="modal hidden">
+<!-- ── Edit Client Modal ─────────────────────────────────────────────────── -->
+<div id="edit-client-modal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
       <h2>Edit User</h2>
       <button type="button" class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <form onsubmit="submitEdit(event)" class="modal-form">
-      <div class="form-group">
-        <label for="e-name">{{ t.get('name','Name') }}</label>
-        <input type="text" id="e-name" required />
-      </div>
-      <div class="form-group">
-        <label for="e-email">{{ t.get('email','Email') }}</label>
-        <input type="email" id="e-email" />
-      </div>
-      <div class="form-group">
-        <label for="e-notes">{{ t.get('notes','Notes') }}</label>
-        <input type="text" id="e-notes" />
-      </div>
+    <form onsubmit="submitEditClient(event)" class="modal-form">
+      <input type="hidden" id="edit-client-id" />
+      <input type="hidden" id="edit-client-protocol" />
       <div class="form-grid">
         <div class="form-group">
-          <label for="e-limit">{{ t.get('traffic_limit_gb','Traffic GB') }}</label>
-          <input type="number" id="e-limit" min="0" />
+          <label>Name</label>
+          <input type="text" id="edit-client-name" required />
         </div>
         <div class="form-group">
-          <label for="e-expires">{{ t.get('expiry_date','Expiry Date') }}</label>
-          <input type="date" id="e-expires" />
+          <label>Email</label>
+          <input type="email" id="edit-client-email" />
+        </div>
+        <div class="form-group">
+          <label>Traffic Limit (GB, 0 = ∞)</label>
+          <input type="number" id="edit-client-limit" min="0" />
+          <span class="form-hint">Current: <span id="edit-current-limit"></span></span>
+        </div>
+        <div class="form-group">
+          <label>Expires At</label>
+          <input type="datetime-local" id="edit-client-expires" />
+          <span class="form-hint">Current: <span id="edit-current-expires"></span></span>
+        </div>
+        <div class="form-group form-full">
+          <label>Notes</label>
+          <textarea id="edit-client-notes" rows="2"></textarea>
         </div>
       </div>
-      <input type="hidden" id="e-proto" title="protocol" aria-hidden="true" />
-      <input type="hidden" id="e-cid" title="client id" aria-hidden="true" />
+
+      <details style="margin-top:16px;border-top:1px solid var(--border-subtle);padding-top:16px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary);font-weight:600">⚙️ Advanced overrides</summary>
+        <div class="form-grid" style="margin-top:12px">
+          <div class="form-group">
+            <label>DNS</label>
+            <input type="text" id="edit-client-dns" placeholder="inherit" />
+          </div>
+          <div class="form-group">
+            <label>MTU</label>
+            <input type="number" id="edit-client-mtu" min="576" max="9000" placeholder="inherit" />
+          </div>
+          <div class="form-group">
+            <label>Persistent Keepalive</label>
+            <input type="number" id="edit-client-keepalive" min="0" max="65535" placeholder="inherit" />
+          </div>
+          <div class="form-group">
+            <label>AllowedIPs</label>
+            <input type="text" id="edit-client-allowed" placeholder="inherit" />
+          </div>
+        </div>
+      </details>
+
+      <details style="margin-top:16px;border-top:1px solid var(--border-subtle);padding-top:16px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary);font-weight:600">🔧 Quick actions</summary>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-outline btn-sm" onclick="resetTraffic()">♻️ Reset Traffic</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="extendExpiry(7)">+7 days</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="extendExpiry(30)">+30 days</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="extendExpiry(365)">+1 year</button>
+        </div>
+      </details>
+
       <div class="modal-footer">
-        <button type="button" class="btn btn-ghost" onclick="closeModal()">{{ t.get('cancel','Cancel') }}</button>
-        <button type="submit" class="btn btn-primary">{{ t.get('save','Save') }}</button>
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="edit-client-btn">
+          <span id="edit-client-spinner" class="spinner hidden"></span> Save
+        </button>
       </div>
     </form>
   </div>
 </div>
 
-<!-- QR Modal -->
-<div id="qr-modal" class="modal modal-narrow hidden">
+<!-- ── Bulk Create Modal ────────────────────────────────────────────────── -->
+<div id="bulk-create-modal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
-      <h2 id="qr-title">QR Code</h2>
+      <h2>Bulk Create Users</h2>
+      <button type="button" class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitBulkCreate(event)" class="modal-form">
+      <input type="hidden" id="bulk-protocol" />
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Count</label>
+          <input type="number" id="bulk-count" value="5" min="1" max="100" required />
+        </div>
+        <div class="form-group">
+          <label>Prefix</label>
+          <input type="text" id="bulk-prefix" value="user" required />
+        </div>
+        <div class="form-group">
+          <label>Traffic Limit (GB, 0 = ∞)</label>
+          <input type="number" id="bulk-limit" value="0" min="0" />
+        </div>
+        <div class="form-group">
+          <label>Validity (days, 0 = ∞)</label>
+          <input type="number" id="bulk-validity" value="0" min="0" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="bulk-create-btn">
+          <span id="bulk-create-spinner" class="spinner hidden"></span> Create
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── QR Modal ──────────────────────────────────────────────────────────── -->
+<div id="qr-modal" class="modal hidden">
+  <div class="modal-content modal-narrow">
+    <div class="modal-header">
+      <h2 id="qr-modal-title">QR Code</h2>
       <button type="button" class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="qr-container">
-      <img id="qr-img" src="" alt="QR Code" />
-      <div class="qr-label" id="qr-label"></div>
+      <img id="qr-image" src="" alt="QR Code" />
     </div>
     <div class="modal-footer">
-      <button type="button" class="btn btn-primary btn-block" onclick="closeModal()">{{ t.get('close','Close') }}</button>
+      <button type="button" class="btn btn-primary btn-block" onclick="closeModal()">Close</button>
     </div>
   </div>
 </div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-const SID = '{{ server.id }}';
+const SERVER_ID = '{{ server.id }}';
 let currentProtocol = null;
-
-function now_iso() { return new Date().toISOString(); }
+let editingClientId = null;
+let pendingResetTraffic = false;
+let pendingExtendDays = 0;
 
 function switchTab(proto, btn) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
@@ -369,268 +493,506 @@ function switchTab(proto, btn) {
   btn.classList.add('active');
 }
 
-// ── Search ──────────────────────────────────────────────────────────────
-function filterClients(input, proto) {
-  const q = input.value.toLowerCase();
-  document.querySelectorAll(`#table-${proto} tbody tr`).forEach(row => {
-    row.style.display = !q || row.dataset.name.includes(q) ? '' : 'none';
-  });
-}
-
-// ── Install forms ────────────────────────────────────────────────────────
+// ── Install modal ──────────────────────────────────────────────────────────────
 const INSTALL_FORMS = {
-  awg:        `<div class="form-group"><label>UDP Port</label><input id="p-port" type="number" value="51820"/></div>
-               <div class="form-group"><label>Subnet</label><input id="p-subnet" type="text" value="10.8.1.0/24"/></div>
-               <div class="form-group"><label>DNS</label><input id="p-dns" type="text" value="1.1.1.1"/></div>`,
-  wireguard:  `<div class="form-group"><label>UDP Port</label><input id="p-port" type="number" value="51820"/></div>
-               <div class="form-group"><label>Subnet</label><input id="p-subnet" type="text" value="10.8.0.0/24"/></div>
-               <div class="form-group"><label>DNS</label><input id="p-dns" type="text" value="1.1.1.1"/></div>`,
-  xray:       `<div class="form-group"><label>Port</label><input id="p-port" type="number" value="443"/></div>
-               <div class="form-group"><label>Reality SNI</label><input id="p-dest" type="text" value="www.microsoft.com"/></div>`,
-  xray_ws:    `<div class="form-group"><label>Port</label><input id="p-port" type="number" value="8443"/></div>
-               <div class="form-group"><label>WS Path</label><input id="p-path" type="text" value="/vless"/></div>`,
-  xray_grpc:  `<div class="form-group"><label>Port</label><input id="p-port" type="number" value="8444"/></div>
-               <div class="form-group"><label>Service Name</label><input id="p-svc" type="text" value="grpc"/></div>`,
-  xray_vmess: `<div class="form-group"><label>Port</label><input id="p-port" type="number" value="8080"/></div>
-               <div class="form-group"><label>WS Path</label><input id="p-path" type="text" value="/vmess"/></div>`,
-  xray_trojan:`<div class="form-group"><label>Port</label><input id="p-port" type="number" value="443"/></div>`,
-  xray_ss:    `<div class="form-group"><label>Port</label><input id="p-port" type="number" value="54321"/></div>`,
-  openvpn:    `<div class="form-group"><label>UDP Port</label><input id="p-port" type="number" value="1194"/></div>
-               <div class="form-group"><label>DNS</label><input id="p-dns" type="text" value="1.1.1.1"/></div>`,
+  awg: `
+    <div class="form-group"><label>UDP Port</label><input type="number" id="p-port" value="51820"/></div>
+    <div class="form-group"><label>Subnet</label><input type="text" id="p-subnet" value="10.8.1.0/24"/></div>
+    <div class="form-group"><label>DNS</label><input type="text" id="p-dns" value="1.1.1.1"/></div>`,
+  wireguard: `
+    <div class="form-group"><label>UDP Port</label><input type="number" id="p-port" value="51820"/></div>
+    <div class="form-group"><label>Subnet</label><input type="text" id="p-subnet" value="10.8.0.0/24"/></div>
+    <div class="form-group"><label>DNS</label><input type="text" id="p-dns" value="1.1.1.1"/></div>`,
+  xray: `
+    <div class="form-group"><label>Port</label><input type="number" id="p-port" value="443"/></div>
+    <div class="form-group"><label>Reality Destination (SNI)</label><input type="text" id="p-dest" value="www.microsoft.com"/></div>`,
+  xray_ws: `
+    <div class="form-group"><label>Port</label><input type="number" id="p-port" value="8443"/></div>
+    <div class="form-group"><label>WebSocket Path</label><input type="text" id="p-path" value="/vless"/></div>`,
+  xray_grpc: `
+    <div class="form-group"><label>Port</label><input type="number" id="p-port" value="8444"/></div>
+    <div class="form-group"><label>gRPC Service Name</label><input type="text" id="p-svc" value="grpc"/></div>`,
+  xray_vmess: `
+    <div class="form-group"><label>Port</label><input type="number" id="p-port" value="8080"/></div>
+    <div class="form-group"><label>WebSocket Path</label><input type="text" id="p-path" value="/vmess"/></div>`,
+  xray_trojan: `
+    <div class="form-group"><label>Port</label><input type="number" id="p-port" value="443"/></div>`,
+  xray_ss: `
+    <div class="form-group"><label>Port</label><input type="number" id="p-port" value="54321"/></div>`,
+  openvpn: `
+    <div class="form-group"><label>UDP Port</label><input type="number" id="p-port" value="1194"/></div>
+    <div class="form-group"><label>DNS</label><input type="text" id="p-dns" value="1.1.1.1"/></div>`,
 };
 
 function openInstallModal(proto, label) {
   currentProtocol = proto;
   document.getElementById('install-modal-title').textContent = `Install ${label}`;
   document.getElementById('install-modal-body').innerHTML = INSTALL_FORMS[proto] || '';
-  document.getElementById('install-modal-body').classList.remove('hidden');
-  document.getElementById('install-progress').classList.add('hidden');
-  document.getElementById('install-footer').classList.remove('hidden');
-  document.getElementById('install-log').innerHTML = '';
-  document.getElementById('p-status').textContent = '{{ t.get("installing","Installing…") }}';
-  document.getElementById('p-status').style.color = '';
-  document.getElementById('p-spinner').style.display = '';
   document.getElementById('install-modal').classList.remove('hidden');
   document.getElementById('modal-overlay').classList.remove('hidden');
+  // Reset view
+  document.getElementById('install-modal-body').classList.remove('hidden');
+  document.getElementById('install-modal-footer').classList.remove('hidden');
+  document.getElementById('install-progress').classList.add('hidden');
+  document.getElementById('install-log').innerHTML = '';
+  document.getElementById('progress-spinner').style.display = '';
 }
 
 async function confirmInstall() {
   const body = { port: parseInt(document.getElementById('p-port')?.value) };
-  const fields = {
-    'p-subnet': 'subnet', 'p-dns': 'dns', 'p-dest': 'dest_domain',
-    'p-path': 'path', 'p-svc': 'service_name'
-  };
-  for (const [id, key] of Object.entries(fields)) {
-    const el = document.getElementById(id);
-    if (el) body[key] = el.value;
-  }
+  if (document.getElementById('p-subnet'))  body.subnet       = document.getElementById('p-subnet').value;
+  if (document.getElementById('p-dns'))     body.dns          = document.getElementById('p-dns').value;
+  if (document.getElementById('p-dest'))    body.dest_domain  = document.getElementById('p-dest').value;
+  if (document.getElementById('p-path'))    body.path         = document.getElementById('p-path').value;
+  if (document.getElementById('p-svc'))     body.service_name = document.getElementById('p-svc').value;
 
   document.getElementById('install-modal-body').classList.add('hidden');
-  document.getElementById('install-footer').classList.add('hidden');
+  document.getElementById('install-modal-footer').classList.add('hidden');
   document.getElementById('install-progress').classList.remove('hidden');
+  document.getElementById('install-log').innerHTML = '';
+  document.getElementById('progress-status-text').textContent = 'Starting installation...';
 
-  const res = await fetch(`/api/servers/${SID}/protocols/${currentProtocol}/install`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${currentProtocol}/install`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
   });
+  if (!res) { closeModal(); return; }
   const init = await res.json();
   if (!init.success || !init.task_id) {
-    showToast(init.error || 'Failed to start', 'error');
-    closeModal(); return;
+    showToast(init.error || 'Failed to start installation', 'error');
+    closeModal();
+    return;
   }
   await pollInstallTask(init.task_id);
 }
 
 async function pollInstallTask(taskId) {
   const logEl = document.getElementById('install-log');
-  const statusEl = document.getElementById('p-status');
+  const statusEl = document.getElementById('progress-status-text');
   let lastLen = 0;
+
   while (true) {
     await new Promise(r => setTimeout(r, 1200));
     try {
-      const task = await (await fetch(`/api/tasks/${taskId}`)).json();
-      task.logs.slice(lastLen).forEach(msg => {
-        const d = document.createElement('div');
-        d.className = 'log-line'; d.textContent = msg;
-        logEl.appendChild(d);
+      const res = await fetch(`/api/tasks/${taskId}`);
+      if (!res.ok) continue;
+      const task = await res.json();
+
+      const newLogs = task.logs.slice(lastLen);
+      newLogs.forEach(msg => {
+        const div = document.createElement('div');
+        div.className = 'log-line';
+        div.textContent = msg;
+        logEl.appendChild(div);
       });
       lastLen = task.logs.length;
       logEl.scrollTop = logEl.scrollHeight;
+
       if (task.done) {
-        document.getElementById('p-spinner').style.display = 'none';
+        document.getElementById('progress-spinner').style.display = 'none';
         if (task.success) {
-          statusEl.textContent = '✓ {{ t.get("install_complete","Done!") }}';
+          statusEl.textContent = '✓ Installation complete!';
           statusEl.style.color = 'var(--green)';
-          showToast('{{ t.get("install_complete","Installed!") }}', 'success');
+          // Append final OK line
+          const okLine = document.createElement('div');
+          okLine.className = 'log-line ok';
+          okLine.textContent = 'Done';
+          logEl.appendChild(okLine);
+          showToast('Protocol installed successfully', 'success');
           setTimeout(() => { closeModal(); location.reload(); }, 1500);
         } else {
-          const d = document.createElement('div'); d.className = 'log-line err';
-          d.textContent = task.error || 'Failed'; logEl.appendChild(d);
-          statusEl.textContent = '✕ {{ t.get("install_failed","Failed") }}';
+          const errLine = document.createElement('div');
+          errLine.className = 'log-line err';
+          errLine.textContent = task.error || 'Installation failed';
+          logEl.appendChild(errLine);
+          statusEl.textContent = '✕ Installation failed';
           statusEl.style.color = 'var(--red)';
-          showToast(task.error || '{{ t.get("install_failed","Failed") }}', 'error');
-          document.getElementById('install-footer').classList.remove('hidden');
+          showToast(task.error || 'Installation failed', 'error');
+          document.getElementById('install-modal-footer').classList.remove('hidden');
         }
         break;
       }
-    } catch { /* ignore */ }
+    } catch (e) { /* network blip */ }
   }
 }
 
 async function uninstallProtocol(proto, label) {
   if (!confirm(`Remove ${label}? All users will be deleted.`)) return;
-  const res = await fetch(`/api/servers/${SID}/protocols/${proto}/uninstall`, {method:'POST'});
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/uninstall`, {method:'POST'});
+  if (!res) return;
   const data = await res.json();
-  if (data.success) { showToast('Removed', 'success'); setTimeout(() => location.reload(), 700); }
+  if (data.success) { showToast('Protocol removed', 'success'); setTimeout(() => location.reload(), 700); }
   else showToast(data.error || 'Error', 'error');
 }
 
-// ── Add client ───────────────────────────────────────────────────────────
+// ── Client CRUD ────────────────────────────────────────────────────────────────
 function openAddClientModal(proto) {
-  document.getElementById('c-proto').value = proto;
-  ['c-name','c-email','c-notes','c-expires'].forEach(id => { const el = document.getElementById(id); if(el) el.value=''; });
-  document.getElementById('c-limit').value = '0';
-  document.getElementById('c-days').value = '0';
+  document.getElementById('new-client-protocol').value = proto;
+  document.getElementById('new-client-name').value = '';
+  document.getElementById('new-client-email').value = '';
+  document.getElementById('new-client-limit').value = '0';
+  document.getElementById('new-client-validity').value = '0';
+  document.getElementById('new-client-notes').value = '';
+  document.getElementById('new-client-ip').value = '';
+  document.getElementById('new-client-dns').value = '';
+  document.getElementById('new-client-mtu').value = '';
+  document.getElementById('new-client-keepalive').value = '';
+  document.getElementById('new-client-allowed').value = '';
+  // Hide IP field for non-WG protocols
+  document.getElementById('adv-ip-group').style.display = (proto === 'awg' || proto === 'wireguard') ? '' : 'none';
   document.getElementById('add-client-modal').classList.remove('hidden');
   document.getElementById('modal-overlay').classList.remove('hidden');
 }
 
 async function submitAddClient(e) {
   e.preventDefault();
-  const proto = document.getElementById('c-proto').value;
-  const body = {
-    name: document.getElementById('c-name').value,
-    email: document.getElementById('c-email').value,
-    notes: document.getElementById('c-notes').value,
-    traffic_limit_gb: parseInt(document.getElementById('c-limit').value)||0,
-    validity_days: parseInt(document.getElementById('c-days').value)||0,
-    expires_at: document.getElementById('c-expires').value || null,
-  };
-  setLoading('add-client-btn','add-client-spinner',true);
-  const res = await fetch(`/api/servers/${SID}/protocols/${proto}/clients`,{
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body),
+  const proto = document.getElementById('new-client-protocol').value;
+  const name  = document.getElementById('new-client-name').value;
+  const email = document.getElementById('new-client-email').value;
+  const limit = parseInt(document.getElementById('new-client-limit').value) || 0;
+  const validity = parseInt(document.getElementById('new-client-validity').value) || 0;
+  const notes = document.getElementById('new-client-notes').value;
+  setLoading('add-client-btn', 'add-client-spinner', true);
+
+  const body = { name, email, notes, traffic_limit_gb: limit, validity_days: validity };
+  // Advanced overrides
+  const ip = document.getElementById('new-client-ip').value.trim();
+  const dns = document.getElementById('new-client-dns').value.trim();
+  const mtu = document.getElementById('new-client-mtu').value;
+  const ka  = document.getElementById('new-client-keepalive').value;
+  const allowed = document.getElementById('new-client-allowed').value.trim();
+  if (ip) body.ip = ip;
+  if (dns) body.dns = dns;
+  if (mtu) body.mtu = parseInt(mtu);
+  if (ka) body.persistent_keepalive = parseInt(ka);
+  if (allowed) body.allowed_ips = allowed;
+
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body),
   });
-  const data = await res.json();
-  setLoading('add-client-btn','add-client-spinner',false);
-  if (data.success) { showToast('{{ t.get("user_added","Added") }}','success'); closeModal(); setTimeout(()=>location.reload(),700); }
-  else showToast(data.error||'Error','error');
-}
-
-// ── Bulk create ──────────────────────────────────────────────────────────
-function openBulkModal(proto) {
-  document.getElementById('b-proto').value = proto;
-  document.getElementById('bulk-modal').classList.remove('hidden');
-  document.getElementById('modal-overlay').classList.remove('hidden');
-}
-
-async function submitBulk(e) {
-  e.preventDefault();
-  const proto = document.getElementById('b-proto').value;
-  const body = {
-    prefix: document.getElementById('b-prefix').value,
-    count: parseInt(document.getElementById('b-count').value)||1,
-    traffic_limit_gb: parseInt(document.getElementById('b-limit').value)||0,
-    validity_days: parseInt(document.getElementById('b-days').value)||0,
-  };
-  setLoading('bulk-btn','bulk-spinner',true);
-  const res = await fetch(`/api/servers/${SID}/protocols/${proto}/clients/bulk`,{
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  setLoading('bulk-btn','bulk-spinner',false);
-  if (data.success) {
-    showToast(`Created ${data.created} users`, 'success');
-    closeModal(); setTimeout(()=>location.reload(),700);
-  } else showToast(data.error||'Error','error');
-}
-
-// ── Edit client ──────────────────────────────────────────────────────────
-function openEditModal(proto, cid, name, email, notes, expires, limitGb) {
-  document.getElementById('e-proto').value = proto;
-  document.getElementById('e-cid').value = cid;
-  document.getElementById('e-name').value = name;
-  document.getElementById('e-email').value = email;
-  document.getElementById('e-notes').value = notes;
-  document.getElementById('e-expires').value = expires ? expires.slice(0,10) : '';
-  document.getElementById('e-limit').value = limitGb;
-  document.getElementById('edit-modal').classList.remove('hidden');
-  document.getElementById('modal-overlay').classList.remove('hidden');
-}
-
-async function submitEdit(e) {
-  e.preventDefault();
-  const proto = document.getElementById('e-proto').value;
-  const cid   = document.getElementById('e-cid').value;
-  const body  = {
-    name: document.getElementById('e-name').value,
-    email: document.getElementById('e-email').value,
-    notes: document.getElementById('e-notes').value,
-    expires_at: document.getElementById('e-expires').value || null,
-    traffic_limit_gb: parseInt(document.getElementById('e-limit').value)||0,
-  };
-  const res = await fetch(`/api/servers/${SID}/protocols/${proto}/clients/${cid}`,{
-    method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (data.success) { showToast('Saved','success'); closeModal(); setTimeout(()=>location.reload(),700); }
-  else showToast(data.error||'Error','error');
-}
-
-// ── Toggle / Delete ──────────────────────────────────────────────────────
-async function toggleClient(proto, cid, btn) {
-  const res = await fetch(`/api/servers/${SID}/protocols/${proto}/clients/${cid}/toggle`,{method:'POST'});
+  setLoading('add-client-btn', 'add-client-spinner', false);
+  if (!res) return;
   const data = await res.json();
   if (data.success) {
-    btn.textContent = data.enabled ? '✅' : '❌';
-    document.getElementById(`cr-${cid}`).classList.toggle('disabled-row', !data.enabled);
+    showToast('User added', 'success'); closeModal(); setTimeout(() => location.reload(), 700);
+  } else {
+    showToast(data.error || 'Error', 'error');
   }
 }
 
-function downloadConfig(proto, cid) {
-  window.location.href = `/api/servers/${SID}/protocols/${proto}/clients/${cid}/config`;
+function openEditClientModal(proto, clientId) {
+  // Fetch current client data from the table row
+  const row = document.getElementById(`client-row-${clientId}`);
+  if (!row) return;
+  editingClientId = clientId;
+  pendingResetTraffic = false;
+  pendingExtendDays = 0;
+
+  document.getElementById('edit-client-protocol').value = proto;
+  document.getElementById('edit-client-id').value = clientId;
+  document.getElementById('edit-client-name').value = row.dataset.name || '';
+  // email is in 2nd cell's child div
+  const emailEl = row.querySelector('td:nth-child(2) div:nth-child(2)');
+  document.getElementById('edit-client-email').value = emailEl ? emailEl.textContent.trim() : '';
+  // expires_at — fetch from the row's 5th cell (relative to schema)
+  // Easier: just leave it editable, user fills it
+  // We need to fetch the actual client data — let's parse from row attributes (limited).
+  // For simplicity, we'll just show "current value" hints based on what's in the row.
+  document.getElementById('edit-current-expires').textContent = row.dataset.expires ? row.dataset.expires.slice(0,10) : '∞';
+  document.getElementById('edit-current-limit').textContent = '?';
+
+  document.getElementById('edit-client-notes').value = '';
+  document.getElementById('edit-client-dns').value = '';
+  document.getElementById('edit-client-mtu').value = '';
+  document.getElementById('edit-client-keepalive').value = '';
+  document.getElementById('edit-client-allowed').value = '';
+
+  document.getElementById('edit-client-modal').classList.remove('hidden');
+  document.getElementById('modal-overlay').classList.remove('hidden');
 }
 
-function showQR(proto, cid, name) {
-  document.getElementById('qr-title').textContent = `QR — ${name}`;
-  document.getElementById('qr-label').textContent = name;
-  document.getElementById('qr-img').src = `/api/servers/${SID}/protocols/${proto}/clients/${cid}/qr`;
+function resetTraffic() {
+  pendingResetTraffic = true;
+  showToast('Traffic will be reset on save', 'info');
+}
+
+function extendExpiry(days) {
+  pendingExtendDays = days;
+  showToast(`Expiry will be extended by ${days} days on save`, 'info');
+}
+
+async function submitEditClient(e) {
+  e.preventDefault();
+  const proto = document.getElementById('edit-client-protocol').value;
+  const clientId = document.getElementById('edit-client-id').value;
+  const body = {
+    name: document.getElementById('edit-client-name').value,
+    email: document.getElementById('edit-client-email').value,
+    notes: document.getElementById('edit-client-notes').value,
+  };
+  const limitVal = document.getElementById('edit-client-limit').value;
+  if (limitVal !== '') body.traffic_limit_gb = parseInt(limitVal) || 0;
+  const expiresVal = document.getElementById('edit-client-expires').value;
+  if (expiresVal) body.expires_at = new Date(expiresVal).toISOString();
+  const dns = document.getElementById('edit-client-dns').value.trim();
+  if (dns) body.dns = dns;
+  const mtu = document.getElementById('edit-client-mtu').value;
+  if (mtu) body.mtu = parseInt(mtu);
+  const ka = document.getElementById('edit-client-keepalive').value;
+  if (ka) body.persistent_keepalive = parseInt(ka);
+  const allowed = document.getElementById('edit-client-allowed').value.trim();
+  if (allowed) body.allowed_ips = allowed;
+  if (pendingResetTraffic) body.reset_traffic = true;
+  if (pendingExtendDays > 0) body.extend_days = pendingExtendDays;
+
+  setLoading('edit-client-btn', 'edit-client-spinner', true);
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}`, {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  setLoading('edit-client-btn', 'edit-client-spinner', false);
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) {
+    showToast('User updated', 'success'); closeModal(); setTimeout(() => location.reload(), 700);
+  } else {
+    showToast(data.error || 'Error', 'error');
+  }
+}
+
+async function cloneClient(proto, clientId, name) {
+  const newName = prompt(`Clone "${name}" — enter new name:`, `${name}_copy`);
+  if (!newName) return;
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/clone`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name: newName }),
+  });
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) { showToast('User cloned', 'success'); setTimeout(() => location.reload(), 700); }
+  else showToast(data.error || 'Error', 'error');
+}
+
+async function toggleClient(proto, clientId, btn) {
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/toggle`, {method:'POST'});
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) {
+    const row = document.getElementById(`client-row-${clientId}`);
+    btn.className = `toggle-btn ${data.enabled ? 'enabled' : 'disabled'}`;
+    row.classList.toggle('disabled-row', !data.enabled);
+  }
+}
+
+function downloadConfig(proto, clientId) {
+  window.location.href = `/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/config`;
+}
+
+function showQR(proto, clientId, name) {
+  document.getElementById('qr-modal-title').textContent = `QR — ${name}`;
+  document.getElementById('qr-image').src = `/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}/qr`;
   document.getElementById('qr-modal').classList.remove('hidden');
   document.getElementById('modal-overlay').classList.remove('hidden');
 }
 
-async function deleteClient(proto, cid, name) {
-  if (!confirm(`Delete "${name}"?`)) return;
-  const res = await fetch(`/api/servers/${SID}/protocols/${proto}/clients/${cid}`,{method:'DELETE'});
+async function deleteClient(proto, clientId, name) {
+  if (!confirm(`Delete user "${name}"?`)) return;
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${clientId}`, {method:'DELETE'});
+  if (!res) return;
   const data = await res.json();
-  if (data.success) { document.getElementById(`cr-${cid}`).remove(); showToast('Deleted','success'); }
-  else showToast(data.error||'Error','error');
+  if (data.success) {
+    document.getElementById(`client-row-${clientId}`).remove();
+    showToast('User deleted', 'success');
+  } else showToast(data.error || 'Error', 'error');
 }
 
-// ── Traffic & Detection ──────────────────────────────────────────────────
-async function syncTraffic() {
-  showToast('{{ t.get("sync_traffic","Syncing…") }}','info');
-  const res = await fetch(`/api/servers/${SID}/sync-traffic`,{method:'POST'});
+// ── Bulk Create ───────────────────────────────────────────────────────────────
+function openBulkCreateModal(proto) {
+  document.getElementById('bulk-protocol').value = proto;
+  document.getElementById('bulk-count').value = '5';
+  document.getElementById('bulk-prefix').value = 'user';
+  document.getElementById('bulk-limit').value = '0';
+  document.getElementById('bulk-validity').value = '0';
+  document.getElementById('bulk-create-modal').classList.remove('hidden');
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+async function submitBulkCreate(e) {
+  e.preventDefault();
+  const proto = document.getElementById('bulk-protocol').value;
+  const body = {
+    count: parseInt(document.getElementById('bulk-count').value) || 1,
+    prefix: document.getElementById('bulk-prefix').value,
+    traffic_limit_gb: parseInt(document.getElementById('bulk-limit').value) || 0,
+    validity_days: parseInt(document.getElementById('bulk-validity').value) || 0,
+  };
+  setLoading('bulk-create-btn', 'bulk-create-spinner', true);
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/bulk`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
+  });
+  setLoading('bulk-create-btn', 'bulk-create-spinner', false);
+  if (!res) return;
   const data = await res.json();
-  if (data.success) { showToast('Synced','success'); setTimeout(()=>location.reload(),700); }
-  else showToast(data.error||'Error','error');
+  if (data.success) {
+    showToast(`Created ${data.created} users`, 'success');
+    if (data.errors?.length) showToast(`${data.errors.length} errors`, 'error');
+    closeModal(); setTimeout(() => location.reload(), 1000);
+  } else showToast(data.error || 'Error', 'error');
+}
+
+// ── Search / Filter / Sort ────────────────────────────────────────────────────
+function filterClients(proto) {
+  const search = (document.getElementById(`search-${proto}`)?.value || '').toLowerCase();
+  const filter = document.getElementById(`filter-status-${proto}`)?.value || 'all';
+  const tbody = document.getElementById(`tbody-${proto}`);
+  if (!tbody) return;
+  let visibleCount = 0;
+  const now = Date.now();
+  const weekMs = 7 * 24 * 3600 * 1000;
+
+  tbody.querySelectorAll('tr').forEach(row => {
+    const name = (row.dataset.name || '').toLowerCase();
+    const ip = (row.dataset.ip || '').toLowerCase();
+    const enabled = row.dataset.enabled === 'true';
+    const expires = row.dataset.expires;
+    let matchSearch = !search || name.includes(search) || ip.includes(search);
+    let matchFilter = true;
+    if (filter === 'enabled') matchFilter = enabled;
+    else if (filter === 'disabled') matchFilter = !enabled;
+    else if (filter === 'expired' && expires) {
+      matchFilter = new Date(expires).getTime() < now;
+    } else if (filter === 'expiring' && expires) {
+      const exp = new Date(expires).getTime();
+      matchFilter = exp > now && exp < (now + weekMs);
+    } else if (filter === 'expired' && !expires) {
+      matchFilter = false;
+    }
+    row.style.display = (matchSearch && matchFilter) ? '' : 'none';
+    if (matchSearch && matchFilter) visibleCount++;
+  });
+  document.getElementById(`count-${proto}`).textContent = `${visibleCount} users`;
+}
+
+function sortClients(proto) {
+  const sortVal = document.getElementById(`sort-${proto}`).value;
+  const tbody = document.getElementById(`tbody-${proto}`);
+  if (!tbody) return;
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    switch (sortVal) {
+      case 'name-asc': return (a.dataset.name||'').localeCompare(b.dataset.name||'');
+      case 'name-desc': return (b.dataset.name||'').localeCompare(a.dataset.name||'');
+      case 'traffic-desc': return Number(b.dataset.traffic||0) - Number(a.dataset.traffic||0);
+      case 'created-desc': return (b.dataset.created||'').localeCompare(a.dataset.created||'');
+      case 'expiry-asc':
+        const ea = a.dataset.expires || '9999';
+        const eb = b.dataset.expires || '9999';
+        return ea.localeCompare(eb);
+      default: return 0;
+    }
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+// ── Bulk select ───────────────────────────────────────────────────────────────
+function toggleAll(proto, master) {
+  const tbody = document.getElementById(`tbody-${proto}`);
+  if (!tbody) return;
+  tbody.querySelectorAll('input.row-checkbox').forEach(cb => {
+    if (cb.parentElement.parentElement.style.display !== 'none') {
+      cb.checked = master.checked;
+    }
+  });
+  updateBulkActions(proto);
+}
+
+function updateBulkActions(proto) {
+  const tbody = document.getElementById(`tbody-${proto}`);
+  if (!tbody) return;
+  const checked = tbody.querySelectorAll('input.row-checkbox:checked');
+  const bar = document.getElementById(`bulk-actions-${proto}`);
+  if (checked.length > 0) {
+    bar.style.display = 'flex';
+    document.getElementById(`bulk-count-${proto}`).textContent = `${checked.length} selected`;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+async function bulkToggle(proto, enabled) {
+  const tbody = document.getElementById(`tbody-${proto}`);
+  const ids = Array.from(tbody.querySelectorAll('input.row-checkbox:checked')).map(cb => cb.value);
+  if (!ids.length) return;
+  if (!confirm(`${enabled ? 'Enable' : 'Disable'} ${ids.length} users?`)) return;
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/bulk-toggle`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ids, enabled }),
+  });
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) {
+    showToast(`${data.toggled} users updated`, 'success');
+    setTimeout(() => location.reload(), 800);
+  } else showToast(data.error || 'Error', 'error');
+}
+
+async function bulkDelete(proto) {
+  const tbody = document.getElementById(`tbody-${proto}`);
+  const ids = Array.from(tbody.querySelectorAll('input.row-checkbox:checked')).map(cb => cb.value);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} users? This cannot be undone.`)) return;
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/bulk-delete`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ids }),
+  });
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) {
+    showToast(`${data.deleted} users deleted`, 'success');
+    setTimeout(() => location.reload(), 800);
+  } else showToast(data.error || 'Error', 'error');
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+function exportClients(proto) {
+  window.location.href = `/api/servers/${SERVER_ID}/protocols/${proto}/clients/export`;
+}
+
+// ── Traffic & Detection ────────────────────────────────────────────────────────
+async function syncTraffic() {
+  showToast('Syncing traffic...', 'info');
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/sync-traffic`, {method:'POST'});
+  if (!res) return;
+  const data = await res.json();
+  if (data.success) { showToast('Traffic synced', 'success'); setTimeout(() => location.reload(), 700); }
+  else showToast(data.error || 'Sync failed', 'error');
 }
 
 async function detectExternal() {
-  showToast('{{ t.get("scanning","Scanning…") }}','info');
-  const res = await fetch(`/api/servers/${SID}/detect-external`,{method:'POST'});
+  showToast('Scanning server for Amnezia configs...', 'info');
+  const res = await apiFetch(`/api/servers/${SERVER_ID}/detect-external`, {method:'POST'});
+  if (!res) return;
   const data = await res.json();
-  if (!data.success) { showToast(data.error||'Error','error'); return; }
-  if (data.total === 0) { showToast('No external configs found','info'); return; }
-  showToast(`Found ${data.total} config(s) — importing…`,'success');
+  if (!data.success) { showToast(data.error || 'Scan failed', 'error'); return; }
+
+  if (data.total === 0) {
+    showToast('No external Amnezia configs found', 'info');
+    return;
+  }
+
+  showToast(`Found ${data.total} external config(s) — importing...`, 'success');
+  let imported = 0;
   for (const [proto, peers] of Object.entries(data.external)) {
-    for (const pk of peers) {
-      await fetch(`/api/servers/${SID}/protocols/${proto}/clients/${pk}/import`,{
+    for (const pubKey of peers) {
+      const r = await apiFetch(`/api/servers/${SERVER_ID}/protocols/${proto}/clients/${encodeURIComponent(pubKey)}/import`, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({name:`Amnezia (${pk.slice(0,8)})`}),
+        body: JSON.stringify({ name: `Amnezia (${pubKey.slice(0,8)})` }),
       });
+      if (r && (await r.json()).success) imported++;
     }
   }
-  showToast(`Imported ${data.total} config(s)`,'success');
-  setTimeout(()=>location.reload(),1200);
+  showToast(`Imported ${imported} config(s)`, 'success');
+  setTimeout(() => location.reload(), 1200);
 }
 </script>
 {% endblock %}

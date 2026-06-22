@@ -5,15 +5,16 @@ import json
 import logging
 import os
 import secrets
+import signal
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import bcrypt
 import qrcode
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form, HTTPException, Depends
+from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import (
     HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse,
 )
@@ -32,7 +33,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_FILE = DATA_DIR / "data.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,12 +47,19 @@ templates = Jinja2Templates(directory="templates")
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_hex(32))
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=86400 * 7)
 
-# All protocols including Xray sub-types
 ALL_PROTOCOLS = ["awg", "wireguard", "xray", "xray_ws", "xray_grpc", "xray_vmess", "xray_trojan", "xray_ss", "openvpn"]
 XRAY_PROTOCOLS = {"xray", "xray_ws", "xray_grpc", "xray_vmess", "xray_trojan", "xray_ss"}
 
+# ── Background install tasks ──────────────────────────────────────────────────
+INSTALL_TASKS: dict[str, dict] = {}
 
-# ─── Data helpers ─────────────────────────────────────────────────────────────
+
+def _task_log(task_id: str, msg: str) -> None:
+    if task_id in INSTALL_TASKS:
+        INSTALL_TASKS[task_id]["logs"].append(msg)
+
+
+# ── Data helpers ──────────────────────────────────────────────────────────────
 
 def _default_data() -> dict:
     pw = os.getenv("ADMIN_PASSWORD", "admin")
@@ -103,35 +111,36 @@ def _make_ssh(server: dict) -> SSHManager:
 
 
 def _ensure_protocols(server: dict):
-    """Make sure server dict has all protocol keys (for old data)."""
-    if "protocols" not in server:
-        server["protocols"] = {}
-    if "clients" not in server:
-        server["clients"] = {}
+    server.setdefault("protocols", {})
+    server.setdefault("clients", {})
     for p in ALL_PROTOCOLS:
         server["protocols"].setdefault(p, {"installed": False})
         server["clients"].setdefault(p, {})
 
 
-# ─── Auth ─────────────────────────────────────────────────────────────────────
+def _default_port(protocol: str) -> int:
+    return {"xray": 443, "xray_ws": 8443, "xray_grpc": 8444,
+            "xray_vmess": 8080, "xray_trojan": 443, "xray_ss": 54321}.get(protocol, 443)
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 def require_auth(request: Request):
     if not request.session.get("authenticated"):
         raise HTTPException(status_code=302, headers={"Location": "/login"})
 
 
-def is_authenticated(request: Request) -> bool:
+def is_auth(request: Request) -> bool:
     return bool(request.session.get("authenticated"))
 
 
-def render(request: Request, template: str, **ctx):
+def render(request: Request, tpl: str, **ctx):
     return templates.TemplateResponse(
-        template,
-        {"request": request, "version": VERSION, "bytes_to_human": bytes_to_human, **ctx},
+        tpl, {"request": request, "version": VERSION, "bytes_to_human": bytes_to_human, **ctx}
     )
 
 
-# ─── WireGuard dump helpers ────────────────────────────────────────────────────
+# ── WireGuard helpers ─────────────────────────────────────────────────────────
 
 def _parse_wg_dump(output: str) -> list[str]:
     peers = []
@@ -150,11 +159,11 @@ def _parse_wg_conf_peers(conf: str) -> list[str]:
     ]
 
 
-# ─── Login / Logout ───────────────────────────────────────────────────────────
+# ── Login ─────────────────────────────────────────────────────────────────────
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    if is_authenticated(request):
+    if is_auth(request):
         return RedirectResponse("/", status_code=302)
     return render(request, "login.html")
 
@@ -177,11 +186,11 @@ async def logout(request: Request):
     return RedirectResponse("/login", status_code=302)
 
 
-# ─── Dashboard ────────────────────────────────────────────────────────────────
+# ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    if not is_authenticated(request):
+    if not is_auth(request):
         return RedirectResponse("/login", status_code=302)
     data = await load_data()
     for s in data["servers"].values():
@@ -189,11 +198,11 @@ async def dashboard(request: Request):
     return render(request, "index.html", servers=list(data["servers"].values()))
 
 
-# ─── Server CRUD ──────────────────────────────────────────────────────────────
+# ── Servers ───────────────────────────────────────────────────────────────────
 
 @app.get("/server/{server_id}", response_class=HTMLResponse)
 async def server_detail(request: Request, server_id: str):
-    if not is_authenticated(request):
+    if not is_auth(request):
         return RedirectResponse("/login", status_code=302)
     data = await load_data()
     server = data["servers"].get(server_id)
@@ -207,11 +216,9 @@ async def server_detail(request: Request, server_id: str):
 async def add_server(request: Request):
     require_auth(request)
     body = await request.json()
-
     server_id = str(uuid.uuid4())
     pw_b64 = base64.b64encode(body.get("password", "").encode()).decode() if body.get("password") else ""
-
-    server: dict = {
+    server = {
         "id": server_id,
         "name": body.get("name", body["host"]),
         "host": body["host"],
@@ -223,12 +230,9 @@ async def add_server(request: Request):
         "protocols": {p: {"installed": False} for p in ALL_PROTOCOLS},
         "clients":   {p: {} for p in ALL_PROTOCOLS},
     }
-
-    ssh = _make_ssh(server)
-    result = ssh.test_connection()
+    result = _make_ssh(server).test_connection()
     if not result["success"]:
         return JSONResponse({"success": False, "error": result.get("error", "Connection failed")})
-
     data = await load_data()
     data["servers"][server_id] = server
     await save_data(data)
@@ -263,9 +267,8 @@ async def reboot_server(request: Request, server_id: str):
     server = data["servers"].get(server_id)
     if not server:
         raise HTTPException(404)
-    ssh = _make_ssh(server)
     try:
-        with ssh:
+        with _make_ssh(server) as ssh:
             ssh.run_sudo("reboot || shutdown -r now &")
     except Exception:
         pass
@@ -289,79 +292,108 @@ async def update_server(request: Request, server_id: str):
     return JSONResponse({"success": True})
 
 
-# ─── Protocol Install / Uninstall ─────────────────────────────────────────────
+# ── Task system ───────────────────────────────────────────────────────────────
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(request: Request, task_id: str):
+    require_auth(request)
+    task = INSTALL_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(404)
+    return JSONResponse(task)
+
+
+async def _run_install_bg(task_id: str, server_id: str, protocol: str, body: dict):
+    """Run protocol installation in background thread."""
+    def log(msg: str):
+        _task_log(task_id, msg)
+
+    loop = asyncio.get_event_loop()
+
+    def sync_work():
+        import threading
+        data_holder = {}
+
+        # We need to load data synchronously from the thread
+        # Use a separate event loop call pattern
+        return data_holder
+
+    try:
+        # Reload fresh data
+        data = await load_data()
+        server = data["servers"].get(server_id)
+        if not server:
+            raise ValueError("Server not found")
+        _ensure_protocols(server)
+
+        proto_conf_result = {}
+
+        def do_install():
+            ssh = _make_ssh(server)
+            with ssh:
+                if protocol == "awg":
+                    mgr = AWGManager(ssh)
+                    return mgr.install(
+                        port=int(body.get("port", 51820)),
+                        subnet=body.get("subnet", "10.8.1.0/24"),
+                        dns=body.get("dns", "1.1.1.1"),
+                        progress=log,
+                    )
+                elif protocol == "wireguard":
+                    mgr = WireGuardManager(ssh)
+                    return mgr.install(
+                        port=int(body.get("port", 51820)),
+                        subnet=body.get("subnet", "10.8.0.0/24"),
+                        dns=body.get("dns", "1.1.1.1"),
+                        progress=log,
+                    )
+                elif protocol in XRAY_PROTOCOLS:
+                    itype = PROTO_TO_ITYPE[protocol]
+                    extra = {}
+                    if itype == "vless-reality":
+                        extra["dest_domain"] = body.get("dest_domain", "www.microsoft.com")
+                    elif itype in ("vless-ws", "vmess-ws"):
+                        extra["path"] = body.get("path", f"/{itype.split('-')[0]}")
+                    elif itype == "vless-grpc":
+                        extra["service_name"] = body.get("service_name", "grpc")
+                    mgr = XrayManager(ssh)
+                    return mgr.add_inbound(
+                        itype, int(body.get("port", _default_port(protocol))),
+                        progress=log, **extra
+                    )
+                elif protocol == "openvpn":
+                    mgr = OpenVPNManager(ssh)
+                    return mgr.install(
+                        port=int(body.get("port", 1194)),
+                        dns=body.get("dns", "1.1.1.1"),
+                        progress=log,
+                    )
+                raise ValueError(f"Unknown protocol: {protocol}")
+
+        result = await loop.run_in_executor(None, do_install)
+
+        server["protocols"][protocol] = {"installed": True, "host": server["host"], **result}
+        await save_data(data)
+        INSTALL_TASKS[task_id].update({"done": True, "success": True})
+
+    except Exception as e:
+        logger.exception("Install task failed")
+        INSTALL_TASKS[task_id].update({"done": True, "success": False, "error": str(e)})
+
+
+# ── Protocol install / uninstall ──────────────────────────────────────────────
 
 @app.post("/api/servers/{server_id}/protocols/{protocol}/install")
 async def install_protocol(request: Request, server_id: str, protocol: str):
     require_auth(request)
     body = await request.json()
 
-    data = await load_data()
-    server = data["servers"].get(server_id)
-    if not server:
-        raise HTTPException(404)
-    _ensure_protocols(server)
+    task_id = str(uuid.uuid4())
+    INSTALL_TASKS[task_id] = {"status": "running", "logs": [], "done": False, "success": None}
 
-    ssh = _make_ssh(server)
-    try:
-        with ssh:
-            if protocol == "awg":
-                mgr = AWGManager(ssh)
-                result = mgr.install(
-                    port=int(body.get("port", 51820)),
-                    subnet=body.get("subnet", "10.8.1.0/24"),
-                    dns=body.get("dns", "1.1.1.1"),
-                )
-                server["protocols"]["awg"] = {"installed": True, **result, "host": server["host"]}
+    asyncio.create_task(_run_install_bg(task_id, server_id, protocol, body))
 
-            elif protocol == "wireguard":
-                mgr = WireGuardManager(ssh)
-                result = mgr.install(
-                    port=int(body.get("port", 51820)),
-                    subnet=body.get("subnet", "10.8.0.0/24"),
-                    dns=body.get("dns", "1.1.1.1"),
-                )
-                server["protocols"]["wireguard"] = {"installed": True, **result, "host": server["host"]}
-
-            elif protocol in XRAY_PROTOCOLS:
-                itype = PROTO_TO_ITYPE[protocol]
-                mgr = XrayManager(ssh)
-                extra_kwargs = {}
-                if itype == "vless-reality":
-                    extra_kwargs["dest_domain"] = body.get("dest_domain", "www.microsoft.com")
-                elif itype in ("vless-ws", "vmess-ws"):
-                    extra_kwargs["path"] = body.get("path", f"/{itype.split('-')[0]}")
-                elif itype == "vless-grpc":
-                    extra_kwargs["service_name"] = body.get("service_name", "grpc")
-
-                inbound = mgr.add_inbound(itype, int(body.get("port", _default_port(protocol))), **extra_kwargs)
-                server["protocols"][protocol] = {"installed": True, "host": server["host"], **inbound}
-
-            elif protocol == "openvpn":
-                mgr = OpenVPNManager(ssh)
-                result = mgr.install(
-                    port=int(body.get("port", 1194)),
-                    dns=body.get("dns", "1.1.1.1"),
-                )
-                server["protocols"]["openvpn"] = {"installed": True, **result, "host": server["host"]}
-
-            else:
-                raise HTTPException(400, f"Unknown protocol: {protocol}")
-
-    except Exception as e:
-        logger.exception("Install error")
-        return JSONResponse({"success": False, "error": str(e)})
-
-    await save_data(data)
-    return JSONResponse({"success": True})
-
-
-def _default_port(protocol: str) -> int:
-    defaults = {
-        "xray": 443, "xray_ws": 8443, "xray_grpc": 8444,
-        "xray_vmess": 8080, "xray_trojan": 443, "xray_ss": 54321,
-    }
-    return defaults.get(protocol, 443)
+    return JSONResponse({"success": True, "task_id": task_id})
 
 
 @app.post("/api/servers/{server_id}/protocols/{protocol}/uninstall")
@@ -372,9 +404,8 @@ async def uninstall_protocol(request: Request, server_id: str, protocol: str):
     if not server:
         raise HTTPException(404)
 
-    ssh = _make_ssh(server)
     try:
-        with ssh:
+        with _make_ssh(server) as ssh:
             if protocol == "awg":
                 AWGManager(ssh).uninstall()
             elif protocol == "wireguard":
@@ -384,11 +415,8 @@ async def uninstall_protocol(request: Request, server_id: str, protocol: str):
                 mgr = XrayManager(ssh)
                 if inbound_id:
                     mgr.remove_inbound(inbound_id)
-                # Only remove Xray service if no other xray protocol is installed after this
-                remaining = [
-                    k for k, v in server["protocols"].items()
-                    if k in XRAY_PROTOCOLS and k != protocol and v.get("installed")
-                ]
+                remaining = [k for k, v in server["protocols"].items()
+                             if k in XRAY_PROTOCOLS and k != protocol and v.get("installed")]
                 if not remaining:
                     mgr.uninstall()
             elif protocol == "openvpn":
@@ -402,7 +430,7 @@ async def uninstall_protocol(request: Request, server_id: str, protocol: str):
     return JSONResponse({"success": True})
 
 
-# ─── Client Management ────────────────────────────────────────────────────────
+# ── Client management ─────────────────────────────────────────────────────────
 
 def _next_ip(proto_conf: dict, clients: dict) -> str:
     subnet = proto_conf.get("subnet", "10.8.1.0/24")
@@ -413,6 +441,18 @@ def _next_ip(proto_conf: dict, clients: dict) -> str:
         if ip not in used:
             return ip
     raise ValueError("IP pool exhausted")
+
+
+def _wg_client(cid, name, ip, keys, body):
+    return {
+        "id": cid, "name": name, "ip": ip,
+        "public_key": keys["public_key"],
+        "private_key": keys["private_key"],
+        "preshared_key": keys["preshared_key"],
+        "enabled": True, "source": "panel", "created_at": now_iso(),
+        "traffic_limit_bytes": int(body.get("traffic_limit_gb", 0)) * 1024 ** 3,
+        "traffic_rx": 0, "traffic_tx": 0, "last_seen": None,
+    }
 
 
 @app.post("/api/servers/{server_id}/protocols/{protocol}/clients")
@@ -432,27 +472,26 @@ async def add_client(request: Request, server_id: str, protocol: str):
 
     proto_conf = server["protocols"][protocol]
     clients = server["clients"].setdefault(protocol, {})
-    client_id = str(uuid.uuid4())
+    cid = str(uuid.uuid4())
 
-    ssh = _make_ssh(server)
     try:
-        with ssh:
+        with _make_ssh(server) as ssh:
             if protocol == "awg":
-                client_ip = body.get("ip") or _next_ip(proto_conf, clients)
-                keys = AWGManager(ssh).add_client(proto_conf, client_name, client_ip)
-                clients[client_id] = _wg_client(client_id, client_name, client_ip, keys, body)
+                ip = body.get("ip") or _next_ip(proto_conf, clients)
+                keys = AWGManager(ssh).add_client(proto_conf, client_name, ip)
+                clients[cid] = _wg_client(cid, client_name, ip, keys, body)
 
             elif protocol == "wireguard":
-                client_ip = body.get("ip") or _next_ip(proto_conf, clients)
-                keys = WireGuardManager(ssh).add_client(proto_conf["server_public_key"], client_ip, client_name)
-                clients[client_id] = _wg_client(client_id, client_name, client_ip, keys, body)
+                ip = body.get("ip") or _next_ip(proto_conf, clients)
+                keys = WireGuardManager(ssh).add_client(proto_conf["server_public_key"], ip, client_name)
+                clients[cid] = _wg_client(cid, client_name, ip, keys, body)
 
             elif protocol in XRAY_PROTOCOLS:
-                itype      = PROTO_TO_ITYPE[protocol]
+                itype = PROTO_TO_ITYPE[protocol]
                 inbound_id = proto_conf["id"]
                 info = XrayManager(ssh).add_client(inbound_id, itype, client_name)
-                clients[client_id] = {
-                    "id": client_id, "name": client_name,
+                clients[cid] = {
+                    "id": cid, "name": client_name,
                     "xray_id": info.get("id", ""),
                     "password": info.get("password", ""),
                     "inbound_id": inbound_id, "inbound_type": itype,
@@ -463,8 +502,8 @@ async def add_client(request: Request, server_id: str, protocol: str):
 
             elif protocol == "openvpn":
                 info = OpenVPNManager(ssh).add_client(client_name)
-                clients[client_id] = {
-                    "id": client_id, "name": client_name,
+                clients[cid] = {
+                    "id": cid, "name": client_name,
                     "safe_name": client_name.replace(" ", "_"),
                     "enabled": True, "source": "panel", "created_at": now_iso(),
                     "traffic_limit_bytes": int(body.get("traffic_limit_gb", 0)) * 1024 ** 3,
@@ -477,19 +516,7 @@ async def add_client(request: Request, server_id: str, protocol: str):
         return JSONResponse({"success": False, "error": str(e)})
 
     await save_data(data)
-    return JSONResponse({"success": True, "client_id": client_id})
-
-
-def _wg_client(client_id, name, ip, keys, body):
-    return {
-        "id": client_id, "name": name, "ip": ip,
-        "public_key": keys["public_key"],
-        "private_key": keys["private_key"],
-        "preshared_key": keys["preshared_key"],
-        "enabled": True, "source": "panel", "created_at": now_iso(),
-        "traffic_limit_bytes": int(body.get("traffic_limit_gb", 0)) * 1024 ** 3,
-        "traffic_rx": 0, "traffic_tx": 0, "last_seen": None,
-    }
+    return JSONResponse({"success": True, "client_id": cid})
 
 
 @app.delete("/api/servers/{server_id}/protocols/{protocol}/clients/{client_id}")
@@ -503,9 +530,8 @@ async def remove_client(request: Request, server_id: str, protocol: str, client_
     if not client:
         raise HTTPException(404)
 
-    ssh = _make_ssh(server)
     try:
-        with ssh:
+        with _make_ssh(server) as ssh:
             if protocol == "awg":
                 AWGManager(ssh).remove_client(client["public_key"])
             elif protocol == "wireguard":
@@ -537,9 +563,8 @@ async def toggle_client(request: Request, server_id: str, protocol: str, client_
 
     enabled = not client["enabled"]
     if protocol in ("awg", "wireguard"):
-        ssh = _make_ssh(server)
         try:
-            with ssh:
+            with _make_ssh(server) as ssh:
                 if protocol == "awg":
                     AWGManager(ssh).toggle_client(client["public_key"], enabled)
                 else:
@@ -552,7 +577,25 @@ async def toggle_client(request: Request, server_id: str, protocol: str, client_
     return JSONResponse({"success": True, "enabled": enabled})
 
 
-# ─── Config / QR ──────────────────────────────────────────────────────────────
+# ── Config & QR ───────────────────────────────────────────────────────────────
+
+def _build_config_text(client: dict, protocol: str, proto_conf: dict, server_host: str) -> str | None:
+    """Return config text/URL, or None if unavailable (external client without keys)."""
+    if protocol == "awg":
+        if not client.get("private_key"):
+            return None
+        return AWGManager(None).build_client_conf(client, {**proto_conf, "host": server_host})
+    elif protocol == "wireguard":
+        if not client.get("private_key"):
+            return None
+        return WireGuardManager(None).build_client_conf(client, {**proto_conf, "host": server_host})
+    elif protocol in XRAY_PROTOCOLS:
+        itype = PROTO_TO_ITYPE[protocol]
+        return XrayManager(None).build_client_url(client, {**proto_conf, "type": itype}, server_host)
+    elif protocol == "openvpn":
+        return client.get("ovpn_config")
+    return None
+
 
 @app.get("/api/servers/{server_id}/protocols/{protocol}/clients/{client_id}/config")
 async def get_client_config(request: Request, server_id: str, protocol: str, client_id: str):
@@ -565,24 +608,16 @@ async def get_client_config(request: Request, server_id: str, protocol: str, cli
     if not client:
         raise HTTPException(404)
 
-    proto_conf = server["protocols"][protocol]
+    text = _build_config_text(client, protocol, server["protocols"].get(protocol, {}), server["host"])
+    if text is None:
+        return JSONResponse({
+            "success": False,
+            "error": "Config unavailable — this client was added by the Amnezia app. The private key is stored on the client device only."
+        }, status_code=422)
 
-    if protocol == "awg":
-        text = AWGManager(None).build_client_conf(client, {**proto_conf, "host": server["host"]})
-        fname = f"awg_{client['name']}.conf"
-    elif protocol == "wireguard":
-        text = WireGuardManager(None).build_client_conf(client, {**proto_conf, "host": server["host"]})
-        fname = f"wg_{client['name']}.conf"
-    elif protocol in XRAY_PROTOCOLS:
-        itype = PROTO_TO_ITYPE[protocol]
-        text = XrayManager(None).build_client_url(client, {**proto_conf, "type": itype}, server["host"])
-        fname = f"xray_{protocol}_{client['name']}.txt"
-    elif protocol == "openvpn":
-        text = client.get("ovpn_config", "")
-        fname = f"{client['name']}.ovpn"
-    else:
-        raise HTTPException(400)
-
+    ext_map = {"awg": "conf", "wireguard": "conf", "openvpn": "ovpn"}
+    ext = ext_map.get(protocol, "txt")
+    fname = f"{protocol}_{client['name']}.{ext}"
     return Response(
         content=text,
         media_type="text/plain; charset=utf-8",
@@ -601,17 +636,9 @@ async def get_client_qr(request: Request, server_id: str, protocol: str, client_
     if not client:
         raise HTTPException(404)
 
-    proto_conf = server["protocols"][protocol]
-
-    if protocol == "awg":
-        text = AWGManager(None).build_client_conf(client, {**proto_conf, "host": server["host"]})
-    elif protocol == "wireguard":
-        text = WireGuardManager(None).build_client_conf(client, {**proto_conf, "host": server["host"]})
-    elif protocol in XRAY_PROTOCOLS:
-        itype = PROTO_TO_ITYPE[protocol]
-        text = XrayManager(None).build_client_url(client, {**proto_conf, "type": itype}, server["host"])
-    else:
-        raise HTTPException(400, "QR not supported for this protocol")
+    text = _build_config_text(client, protocol, server["protocols"].get(protocol, {}), server["host"])
+    if text is None:
+        raise HTTPException(422, "QR unavailable — private key not available for this client")
 
     img = qrcode.make(text)
     buf = io.BytesIO()
@@ -620,7 +647,7 @@ async def get_client_qr(request: Request, server_id: str, protocol: str, client_
     return StreamingResponse(buf, media_type="image/png")
 
 
-# ─── Traffic Sync ─────────────────────────────────────────────────────────────
+# ── Traffic sync ──────────────────────────────────────────────────────────────
 
 @app.post("/api/servers/{server_id}/sync-traffic")
 async def sync_traffic(request: Request, server_id: str):
@@ -630,20 +657,20 @@ async def sync_traffic(request: Request, server_id: str):
     if not server:
         raise HTTPException(404)
 
-    ssh = _make_ssh(server)
     try:
-        with ssh:
+        with _make_ssh(server) as ssh:
             for proto in ["awg", "wireguard"]:
                 if not server["protocols"].get(proto, {}).get("installed"):
                     continue
-                traffic = AWGManager(ssh).get_traffic() if proto == "awg" else WireGuardManager(ssh).get_traffic()
-                for client in server["clients"].get(proto, {}).values():
-                    t = traffic.get(client.get("public_key", ""))
+                mgr = AWGManager(ssh) if proto == "awg" else WireGuardManager(ssh)
+                traffic = mgr.get_traffic()
+                for c in server["clients"].get(proto, {}).values():
+                    t = traffic.get(c.get("public_key", ""))
                     if t:
-                        client["traffic_rx"] = t["rx"]
-                        client["traffic_tx"] = t["tx"]
+                        c["traffic_rx"] = t["rx"]
+                        c["traffic_tx"] = t["tx"]
                         if t["last_seen"]:
-                            client["last_seen"] = datetime.fromtimestamp(t["last_seen"], tz=timezone.utc).isoformat()
+                            c["last_seen"] = datetime.fromtimestamp(t["last_seen"], tz=timezone.utc).isoformat()
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)})
 
@@ -651,100 +678,92 @@ async def sync_traffic(request: Request, server_id: str):
     return JSONResponse({"success": True})
 
 
-# ─── Detect External (Amnezia App) Configs ────────────────────────────────────
+# ── Detect external Amnezia clients ───────────────────────────────────────────
 
 @app.post("/api/servers/{server_id}/detect-external")
-async def detect_external_clients(request: Request, server_id: str):
+async def detect_external(request: Request, server_id: str):
     require_auth(request)
     data = await load_data()
     server = data["servers"].get(server_id)
     if not server:
         raise HTTPException(404)
 
-    # Collect all public keys we already know
     known_keys: set[str] = set()
-    for proto_clients in server["clients"].values():
-        for c in proto_clients.values():
+    for pc in server["clients"].values():
+        for c in pc.values():
             if isinstance(c, dict) and c.get("public_key"):
                 known_keys.add(c["public_key"])
 
     detected: dict[str, list[str]] = {}
 
-    ssh = _make_ssh(server)
     try:
-        with ssh:
-            # 1. Native WireGuard dump
+        with _make_ssh(server) as ssh:
+            # Native wg
             out, _, code = ssh.run_sudo("wg show all dump 2>/dev/null")
             if code == 0:
-                new_peers = [p for p in _parse_wg_dump(out) if p not in known_keys]
-                if new_peers:
-                    detected["wireguard"] = new_peers
+                new = [p for p in _parse_wg_dump(out) if p not in known_keys]
+                if new:
+                    detected["wireguard"] = new
 
-            # 2. Amnezia config files (installed by Amnezia desktop app)
-            for conf_path in ["/opt/amnezia/awg/wg0.conf", "/opt/amnezia/wireguard/wg0.conf"]:
+            # Amnezia config files
+            for path in ["/opt/amnezia/awg/wg0.conf", "/opt/amnezia/wireguard/wg0.conf"]:
                 try:
-                    conf = ssh.download_file(conf_path)
-                    new_peers = [p for p in _parse_wg_conf_peers(conf) if p not in known_keys]
-                    if new_peers:
-                        detected.setdefault("awg", []).extend(new_peers)
+                    new = [p for p in _parse_wg_conf_peers(ssh.download_file(path)) if p not in known_keys]
+                    if new:
+                        detected.setdefault("awg", []).extend(new)
                 except Exception:
                     pass
 
-            # 3. Docker containers (any amnezia/wg related containers)
-            out, _, _ = ssh.run_sudo("docker ps --format '{{.Names}}' 2>/dev/null")
-            for container in out.strip().split("\n"):
-                container = container.strip()
-                if not container:
-                    continue
-                if not any(k in container.lower() for k in ["awg", "wireguard", "amnezia", "wg"]):
+            # Docker containers
+            out2, _, _ = ssh.run_sudo("docker ps --format '{{.Names}}' 2>/dev/null")
+            for cname in out2.strip().split("\n"):
+                cname = cname.strip()
+                if not cname or not any(k in cname.lower() for k in ["awg", "wireguard", "amnezia", "wg"]):
                     continue
                 for cmd in ["awg show all dump", "wg show all dump"]:
-                    out2, _, rc = ssh.run_sudo(f"docker exec {container} {cmd} 2>/dev/null")
-                    if rc == 0 and out2.strip():
-                        new_peers = [p for p in _parse_wg_dump(out2) if p not in known_keys]
-                        if new_peers:
-                            detected.setdefault("awg", []).extend(new_peers)
+                    out3, _, rc = ssh.run_sudo(f"docker exec {cname} {cmd} 2>/dev/null")
+                    if rc == 0 and out3.strip():
+                        new = [p for p in _parse_wg_dump(out3) if p not in known_keys]
+                        if new:
+                            detected.setdefault("awg", []).extend(new)
                         break
-
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)})
 
-    # Deduplicate
     for k in detected:
         detected[k] = list(dict.fromkeys(detected[k]))
 
-    total = sum(len(v) for v in detected.values())
-    return JSONResponse({"success": True, "external": detected, "total": total})
+    return JSONResponse({"success": True, "external": detected, "total": sum(len(v) for v in detected.values())})
 
 
 @app.post("/api/servers/{server_id}/protocols/{protocol}/clients/{public_key}/import")
-async def import_external_client(request: Request, server_id: str, protocol: str, public_key: str):
+async def import_external(request: Request, server_id: str, protocol: str, public_key: str):
     require_auth(request)
     body = await request.json()
     data = await load_data()
     server = data["servers"].get(server_id)
     if not server:
         raise HTTPException(404)
+    _ensure_protocols(server)
 
-    client_id = str(uuid.uuid4())
-    server["clients"].setdefault(protocol, {})[client_id] = {
-        "id": client_id,
-        "name": body.get("name", f"External ({public_key[:8]})"),
+    cid = str(uuid.uuid4())
+    server["clients"].setdefault(protocol, {})[cid] = {
+        "id": cid,
+        "name": body.get("name", f"Amnezia ({public_key[:8]})"),
         "public_key": public_key,
-        "private_key": "", "preshared_key": "",
-        "ip": body.get("ip", ""),
+        "private_key": "", "preshared_key": "", "ip": "",
         "enabled": True, "source": "amnezia_app", "created_at": now_iso(),
         "traffic_limit_bytes": 0, "traffic_rx": 0, "traffic_tx": 0, "last_seen": None,
     }
     await save_data(data)
-    return JSONResponse({"success": True, "client_id": client_id})
+    return JSONResponse({"success": True, "client_id": cid})
 
 
-# ─── Settings ─────────────────────────────────────────────────────────────────
+# ── Settings ──────────────────────────────────────────────────────────────────
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    if not is_authenticated(request):
+    if not is_auth(request):
         return RedirectResponse("/login", status_code=302)
     data = await load_data()
     return render(request, "settings.html", panel=data["panel"])
@@ -755,20 +774,67 @@ async def change_password(request: Request):
     require_auth(request)
     body = await request.json()
     data = await load_data()
-
     if not bcrypt.checkpw(body.get("current_password", "").encode(), data["panel"]["admin_password_hash"].encode()):
         return JSONResponse({"success": False, "error": "Current password is incorrect"})
-
     new_pw = body.get("new_password", "")
     if len(new_pw) < 8:
         return JSONResponse({"success": False, "error": "Password must be at least 8 characters"})
-
     data["panel"]["admin_password_hash"] = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
     await save_data(data)
     return JSONResponse({"success": True})
 
 
-# ─── Background traffic sync ──────────────────────────────────────────────────
+# ── Self-update ───────────────────────────────────────────────────────────────
+
+@app.post("/api/update")
+async def update_panel(request: Request):
+    require_auth(request)
+    try:
+        result = subprocess.run(
+            ["git", "-C", "/app", "pull"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return JSONResponse({"success": False, "error": result.stderr.strip() or "git pull failed"})
+
+        output = result.stdout.strip()
+        if "Already up to date" in output:
+            return JSONResponse({"success": True, "message": "Already up to date.", "restarting": False})
+
+        needs_rebuild = "requirements.txt" in output
+
+        # Restart the process after sending response
+        async def _restart():
+            await asyncio.sleep(2)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        asyncio.create_task(_restart())
+
+        msg = output
+        if needs_rebuild:
+            msg += "\n\n⚠️  requirements.txt changed. Run: docker compose up -d --build"
+
+        return JSONResponse({"success": True, "message": msg, "restarting": not needs_rebuild, "needs_rebuild": needs_rebuild})
+
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.get("/api/version")
+async def get_version(request: Request):
+    require_auth(request)
+    try:
+        result = subprocess.run(
+            ["git", "-C", "/app", "log", "-1", "--format=%H %s"],
+            capture_output=True, text=True, timeout=10,
+        )
+        commit = result.stdout.strip() if result.returncode == 0 else "unknown"
+        return JSONResponse({"version": VERSION, "commit": commit})
+    except Exception:
+        return JSONResponse({"version": VERSION, "commit": "unknown"})
+
+
+# ── Background traffic sync ───────────────────────────────────────────────────
 
 async def _auto_sync():
     while True:
@@ -776,20 +842,17 @@ async def _auto_sync():
         try:
             data = await load_data()
             for server in list(data["servers"].values()):
-                ssh = _make_ssh(server)
                 try:
-                    with ssh:
+                    with _make_ssh(server) as ssh:
                         for proto in ["awg", "wireguard"]:
                             if not server["protocols"].get(proto, {}).get("installed"):
                                 continue
-                            traffic = (AWGManager(ssh) if proto == "awg" else WireGuardManager(ssh)).get_traffic()
-                            for client in server["clients"].get(proto, {}).values():
-                                t = traffic.get(client.get("public_key", ""))
+                            mgr = AWGManager(ssh) if proto == "awg" else WireGuardManager(ssh)
+                            for c in server["clients"].get(proto, {}).values():
+                                t = mgr.get_traffic().get(c.get("public_key", ""))
                                 if t:
-                                    client["traffic_rx"] = t["rx"]
-                                    client["traffic_tx"] = t["tx"]
-                                    if t["last_seen"]:
-                                        client["last_seen"] = datetime.fromtimestamp(t["last_seen"], tz=timezone.utc).isoformat()
+                                    c["traffic_rx"] = t["rx"]
+                                    c["traffic_tx"] = t["tx"]
                 except Exception:
                     pass
             await save_data(data)

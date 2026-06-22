@@ -72,6 +72,10 @@
       <span class="status-badge installed"><span class="status-dot green"></span> Installed</span>
       <button type="button" class="btn btn-danger btn-sm"
               onclick="uninstallProtocol('{{ proto_key }}', '{{ proto_label }}')">Remove</button>
+      {% elif clients %}
+      <span class="status-badge detected"><span class="status-dot blue"></span> Detected (Amnezia App)</span>
+      <button type="button" class="btn btn-primary btn-sm"
+              onclick="openInstallModal('{{ proto_key }}', '{{ proto_label }}')">Install via Panel</button>
       {% else %}
       <span class="status-badge not-installed"><span class="status-dot gray"></span> Not installed</span>
       <button type="button" class="btn btn-primary btn-sm"
@@ -125,7 +129,7 @@
               {% set used_pct = (((client.traffic_rx + client.traffic_tx) / client.traffic_limit_bytes) * 100) | int %}
               <div class="traffic-bar">
                 <div class="traffic-fill {% if used_pct > 90 %}danger{% elif used_pct > 70 %}warning{% endif %}"
-                     style="width: {{ [used_pct, 100]|min }}%"></div>
+                     style="--bar-width: {{ [used_pct, 100]|min }}%"></div>
               </div>
               <small>{{ used_pct }}%</small>
               {% endif %}
@@ -166,11 +170,15 @@
 
             <td>
               <div class="action-buttons">
+                {% if client.source != 'amnezia_app' or client.get('private_key') %}
                 <button type="button" class="btn-icon" title="Download config"
                         onclick="downloadConfig('{{ proto_key }}', '{{ client_id }}')">📥</button>
                 {% if proto_key != 'openvpn' %}
                 <button type="button" class="btn-icon" title="QR Code"
                         onclick="showQR('{{ proto_key }}', '{{ client_id }}', '{{ client.name }}')">📱</button>
+                {% endif %}
+                {% else %}
+                <span class="muted" title="Config stored on client device">📱 On device</span>
                 {% endif %}
                 <button type="button" class="btn-icon btn-danger" title="Delete"
                         onclick="deleteClient('{{ proto_key }}', '{{ client_id }}', '{{ client.name }}')">🗑️</button>
@@ -197,10 +205,20 @@
       <button type="button" class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div id="install-modal-body" class="modal-form-body"></div>
-    <div class="modal-footer">
+
+    <!-- Progress section (hidden until install starts) -->
+    <div id="install-progress" class="hidden">
+      <div class="progress-box" id="install-log"></div>
+      <div class="progress-status">
+        <span class="spinner" id="progress-spinner"></span>
+        <span id="progress-status-text">Installing...</span>
+      </div>
+    </div>
+
+    <div class="modal-footer" id="install-modal-footer">
       <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-      <button id="install-confirm-btn" class="btn btn-primary" onclick="confirmInstall()">
-        <span id="install-spinner" class="spinner hidden"></span> Install
+      <button type="button" id="install-confirm-btn" class="btn btn-primary" onclick="confirmInstall()">
+        Install
       </button>
     </div>
   </div>
@@ -219,8 +237,8 @@
         <input type="text" id="new-client-name" placeholder="user1" required />
       </div>
       <div class="form-group">
-        <label>Traffic Limit (GB, 0 = unlimited)</label>
-        <input type="number" id="new-client-limit" value="0" min="0" />
+        <label for="new-client-limit">Traffic Limit (GB, 0 = unlimited)</label>
+        <input type="number" id="new-client-limit" name="traffic_limit" placeholder="0" value="0" min="0" />
       </div>
       <input type="hidden" id="new-client-protocol" title="selected protocol" aria-hidden="true" />
       <div class="modal-footer">
@@ -303,7 +321,6 @@ function openInstallModal(proto, label) {
 }
 
 async function confirmInstall() {
-  setLoading('install-confirm-btn', 'install-spinner', true);
   const body = { port: parseInt(document.getElementById('p-port')?.value) };
   if (document.getElementById('p-subnet'))  body.subnet       = document.getElementById('p-subnet').value;
   if (document.getElementById('p-dns'))     body.dns          = document.getElementById('p-dns').value;
@@ -311,16 +328,70 @@ async function confirmInstall() {
   if (document.getElementById('p-path'))    body.path         = document.getElementById('p-path').value;
   if (document.getElementById('p-svc'))     body.service_name = document.getElementById('p-svc').value;
 
+  // Switch modal to progress view
+  document.getElementById('install-modal-body').classList.add('hidden');
+  document.getElementById('install-modal-footer').classList.add('hidden');
+  document.getElementById('install-progress').classList.remove('hidden');
+  document.getElementById('install-log').innerHTML = '';
+  document.getElementById('progress-status-text').textContent = 'Starting installation...';
+
   const res = await fetch(`/api/servers/${SERVER_ID}/protocols/${currentProtocol}/install`, {
     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
   });
-  const data = await res.json();
-  setLoading('install-confirm-btn', 'install-spinner', false);
-  if (data.success) {
-    showToast('Protocol installed successfully', 'success');
-    setTimeout(() => location.reload(), 900);
-  } else {
-    showToast(data.error || 'Installation failed', 'error');
+  const init = await res.json();
+  if (!init.success || !init.task_id) {
+    showToast(init.error || 'Failed to start installation', 'error');
+    closeModal();
+    return;
+  }
+
+  // Poll task progress
+  await pollInstallTask(init.task_id);
+}
+
+async function pollInstallTask(taskId) {
+  const logEl = document.getElementById('install-log');
+  const statusEl = document.getElementById('progress-status-text');
+  let lastLen = 0;
+
+  while (true) {
+    await new Promise(r => setTimeout(r, 1200));
+    try {
+      const res = await fetch(`/api/tasks/${taskId}`);
+      if (!res.ok) continue;
+      const task = await res.json();
+
+      // Append new log lines
+      const newLogs = task.logs.slice(lastLen);
+      newLogs.forEach(msg => {
+        const div = document.createElement('div');
+        div.className = 'log-line';
+        div.textContent = msg;
+        logEl.appendChild(div);
+      });
+      lastLen = task.logs.length;
+      logEl.scrollTop = logEl.scrollHeight;
+
+      if (task.done) {
+        document.getElementById('progress-spinner').style.display = 'none';
+        if (task.success) {
+          statusEl.textContent = '✓ Installation complete!';
+          statusEl.style.color = 'var(--green)';
+          showToast('Protocol installed successfully', 'success');
+          setTimeout(() => { closeModal(); location.reload(); }, 1500);
+        } else {
+          const errLine = document.createElement('div');
+          errLine.className = 'log-line err';
+          errLine.textContent = task.error || 'Installation failed';
+          logEl.appendChild(errLine);
+          statusEl.textContent = '✕ Installation failed';
+          statusEl.style.color = 'var(--red)';
+          showToast(task.error || 'Installation failed', 'error');
+          document.getElementById('install-modal-footer').classList.remove('hidden');
+        }
+        break;
+      }
+    } catch (e) { /* ignore network blips */ }
   }
 }
 

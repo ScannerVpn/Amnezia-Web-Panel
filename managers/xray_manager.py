@@ -69,16 +69,29 @@ class XrayManager:
         if not self._config_exists():
             self._write_config(self._base_config())
 
-    def add_inbound(self, inbound_type: str, port: int, **kwargs) -> dict:
+    def add_inbound(self, inbound_type: str, port: int, progress=None, **kwargs) -> dict:
+        def log(msg):
+            if progress:
+                progress(msg)
+
+        log("Installing Xray service...")
         self.ensure_installed()
+
+        log(f"Adding {INBOUND_LABELS.get(inbound_type, inbound_type)} inbound on port {port}...")
         config = self._read_config()
         inbound_id = str(uuid.uuid4())
 
         inbound, extra = self._build_inbound(inbound_type, port, inbound_id, **kwargs)
         config["inbounds"].append(inbound)
         self._write_config(config)
+
+        log("Restarting Xray service...")
         self.ssh.run_sudo("systemctl restart xray")
 
+        log(f"Opening firewall port {port}/tcp...")
+        self.ssh.open_port(port, "tcp")
+
+        log("Xray inbound added successfully!")
         return {
             "id": inbound_id,
             "type": inbound_type,

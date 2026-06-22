@@ -6,6 +6,7 @@ services:
     ports:
       - "${PANEL_PORT:-54325}:54325"
     volumes:
+      - .:/app
       - ./data:/app/data
     env_file:
       - .env

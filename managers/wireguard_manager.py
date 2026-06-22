@@ -27,7 +27,13 @@ class WireGuardManager:
         _, _, code = self.ssh.run_sudo("wg show wg0 2>/dev/null")
         return code == 0
 
-    def install(self, port: int = 51820, subnet: str = "10.8.0.0/24", dns: str = "1.1.1.1") -> dict:
+    def install(self, port: int = 51820, subnet: str = "10.8.0.0/24",
+                dns: str = "1.1.1.1", progress=None) -> dict:
+        def log(msg):
+            if progress:
+                progress(msg)
+
+        log("Installing WireGuard packages...")
         script = f"""\
 #!/bin/bash
 set -e
@@ -39,11 +45,13 @@ mkdir -p /etc/wireguard
 """
         self.ssh.run_sudo_script(script, 300)
 
+        log("Generating WireGuard key pair...")
         priv_key, pub_key = _gen_keypair_on_server(self.ssh)
         iface = self._detect_iface()
         network = subnet.rsplit(".", 1)[0]
         server_ip = network + ".1"
 
+        log("Writing WireGuard configuration...")
         conf = (
             f"[Interface]\n"
             f"Address = {server_ip}/24\n"
@@ -54,8 +62,14 @@ mkdir -p /etc/wireguard
             f"PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {iface} -j MASQUERADE\n"
         )
         self.ssh.upload_sudo_file(conf, WG_CONF)
+
+        log("Starting WireGuard service...")
         self.ssh.run_sudo("systemctl enable wg-quick@wg0 && systemctl start wg-quick@wg0")
 
+        log(f"Opening firewall port {port}/udp...")
+        self.ssh.open_port(port, "udp")
+
+        log("WireGuard installed successfully!")
         return {
             "server_private_key": priv_key,
             "server_public_key": pub_key,

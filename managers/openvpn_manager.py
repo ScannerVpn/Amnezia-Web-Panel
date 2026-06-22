@@ -42,7 +42,7 @@ class OpenVPNManager:
         )
         return code == 0 and "true" in out.lower()
 
-    def install(self, port: int = 1194, dns: str = "1.1.1.1") -> dict:
+    def install(self, port: int = 1194, dns: str = "1.1.1.1", progress=None) -> dict:
         host_ip = self._get_host_ip()
 
         setup_script = f"""\
@@ -66,7 +66,14 @@ docker run -d \\
     -v {OVPN_CONTAINER}-data:/etc/openvpn \\
     kylemanna/openvpn
 """
+        if progress:
+            progress("Installing Docker and OpenVPN container (5-10 min)...")
         self.ssh.run_sudo_script(setup_script, 600)
+        if progress:
+            progress(f"Opening firewall port {port}/udp...")
+        self.ssh.open_port(port, "udp")
+        if progress:
+            progress("OpenVPN installed successfully!")
 
         return {
             "port": port,

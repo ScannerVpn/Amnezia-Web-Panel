@@ -126,6 +126,17 @@ class SSHManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def open_port(self, port: int, protocol: str = "tcp") -> None:
+        """Open a firewall port using ufw or iptables."""
+        proto = protocol.lower()
+        self.run_sudo(f"ufw allow {port}/{proto} 2>/dev/null || true")
+        self.run_sudo(
+            f"iptables -C INPUT -p {proto} --dport {port} -j ACCEPT 2>/dev/null || "
+            f"iptables -I INPUT -p {proto} --dport {port} -j ACCEPT 2>/dev/null || true"
+        )
+        # Persist iptables rules
+        self.run_sudo("(which iptables-save && iptables-save > /etc/iptables/rules.v4) 2>/dev/null || true")
+
     def ping(self) -> dict:
         import time
         try:

@@ -91,26 +91,38 @@ class AWGManager:
         out, _, code = self._exec(f"docker inspect --format='{{{{.State.Running}}}}' {AWG_CONTAINER} 2>/dev/null")
         return code == 0 and "true" in out.lower()
 
-    def install(self, port: int = 51820, subnet: str = "10.8.1.0/24", dns: str = "1.1.1.1") -> dict:
+    def install(self, port: int = 51820, subnet: str = "10.8.1.0/24",
+                dns: str = "1.1.1.1", progress=None) -> dict:
+        def log(msg):
+            if progress:
+                progress(msg)
+
+        log("Installing Docker on server...")
         self.install_docker()
+
+        log("Creating AmneziaWG directory...")
         self._exec(f"mkdir -p {AWG_DIR}")
 
+        log("Generating WireGuard keys...")
         priv_key, pub_key = _gen_keypair()
         params = _rand_awg_params()
 
         iface = self._detect_iface()
         conf = self._build_server_conf(priv_key, port, subnet, dns, iface, params)
 
+        log("Uploading AmneziaWG configuration...")
         self.ssh.upload_sudo_file(conf, AWG_CONF)
         self.ssh.upload_sudo_file(AWG_DOCKERFILE, f"{AWG_DIR}/Dockerfile")
         self.ssh.upload_sudo_file(AWG_ENTRYPOINT, f"{AWG_DIR}/entrypoint.sh")
-
         self._exec(f"chmod +x {AWG_DIR}/entrypoint.sh")
+
+        log("Removing old container (if any)...")
         self._exec(f"docker rm -f {AWG_CONTAINER} 2>/dev/null || true")
-        self._exec(
-            f"docker build -t {AWG_CONTAINER} {AWG_DIR}",
-            timeout=600,
-        )
+
+        log("Building AmneziaWG Docker container (3-5 min)...")
+        self._exec(f"docker build -t {AWG_CONTAINER} {AWG_DIR}", timeout=600)
+
+        log("Starting AmneziaWG container...")
         self._exec(
             f"docker run -d --name {AWG_CONTAINER} --privileged --net=host "
             f"--restart=unless-stopped "
@@ -118,6 +130,10 @@ class AWGManager:
             f"{AWG_CONTAINER}",
         )
 
+        log(f"Opening firewall port {port}/udp...")
+        self.ssh.open_port(port, "udp")
+
+        log("AmneziaWG installed successfully!")
         return {
             "server_private_key": priv_key,
             "server_public_key": pub_key,

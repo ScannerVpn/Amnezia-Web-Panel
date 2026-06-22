@@ -120,7 +120,15 @@ if not SECRET_KEY:
             os.chmod(secret_file, 0o600)
         except OSError:
             pass
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=86400 * 30)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Middlewares: security headers + body size limit + rate limit + CSRF + session
+# IMPORTANT: in Starlette, the LAST added middleware runs FIRST (outermost).
+# We need SessionMiddleware to be outermost so request.session is available
+# to all inner middlewares (CSRF, rate limit, etc.).
+# So: add custom middlewares FIRST, then SessionMiddleware LAST.
+# ──────────────────────────────────────────────────────────────────────────────
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -218,46 +226,41 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 class CSRFMiddleware(BaseHTTPMiddleware):
-    """Double-submit cookie CSRF protection.
-    - Sets a csrf_token cookie on first response
-    - For state-changing requests (POST/PUT/DELETE), validates X-CSRF-Token
-      header against the cookie.
-    - /login is exempted (uses its own protection: session + rate limit)."""
+    """Double-submit CSRF protection.
+    - On GET, ensures a csrf_token is in the session (used by templates).
+    - On POST/PUT/DELETE to /api/*, validates X-CSRF-Token header against session.
+    - /login is exempted (uses its own session + rate limit protection).
+    """
 
     EXEMPT_PATHS = {"/login", "/logout", "/api/language"}
 
     async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-
-        # Issue CSRF cookie if missing
+        # Ensure session has a csrf_token (for templates to use)
         session = request.session
         if "csrf_token" not in session:
             session["csrf_token"] = secrets.token_urlsafe(32)
 
-        return response
+        # Verify CSRF on state-changing requests to /api/*
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            path = request.url.path
+            if path.startswith("/api/") and path not in self.EXEMPT_PATHS:
+                session_token = session.get("csrf_token")
+                header_token = request.headers.get("X-CSRF-Token")
+                if not session_token or not header_token or session_token != header_token:
+                    return JSONResponse(
+                        {"success": False, "error": "CSRF validation failed"},
+                        status_code=403,
+                    )
 
-    async def _verify_csrf(self, request: Request) -> Optional[JSONResponse]:
-        if request.method in ("GET", "HEAD", "OPTIONS"):
-            return None
-        path = request.url.path
-        if path in self.EXEMPT_PATHS:
-            return None
+        return await call_next(request)
 
-        session_token = request.session.get("csrf_token")
-        header_token = request.headers.get("X-CSRF-Token")
-
-        if not session_token or not header_token or session_token != header_token:
-            return JSONResponse(
-                {"success": False, "error": "CSRF validation failed"},
-                status_code=403,
-            )
-        return None
 
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(CSRFMiddleware)
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=86400 * 30)
 
 
 
